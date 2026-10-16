@@ -1,0 +1,13 @@
+# 这个项目全部是 Windows 专用源码，禁止 git 做任何换行符转换。
+#
+# 为什么不用 * text=auto：项目里所有含中文的源文件都必须是 UTF-8 带 BOM，
+# 而换行符自动转换（CRLF <-> LF）在某些配置下会连带影响文件的字节内容，
+# 一旦 BOM 或 CRLF 被改坏，csc 会按 ANSI 解码中文，编译出来的中文全是乱码。
+# 所以这里统一按二进制处理，文件怎么写的就怎么存。
+* -text
+
+# 明确的二进制类型
+*.png  binary
+*.ico  binary
+*.zip  binary
+*.exe  binary

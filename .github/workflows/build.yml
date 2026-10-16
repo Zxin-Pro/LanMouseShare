@@ -1,0 +1,64 @@
+﻿name: build
+
+# 每次推送到 main 或开 PR 时自动编译并跑回环联调。
+# 回环联调只在本机回环地址上跑（不装钩子、不注入输入、不动真实鼠标），所以能在 CI 里安全运行。
+# 自检（--selftest）不在这里跑：它要检查窗口可见、托盘图标、管理员权限，需要交互式桌面会话，
+# 在无桌面的构建代理上必然失败，那是环境问题不是代码问题。
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: 编译并回环联调（Windows）
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 搭建 MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: 编译 Release
+        shell: powershell
+        run: |
+          msbuild src\LanMouseShare.App\LanMouseShare.App.csproj /p:Configuration=Release /v:minimal /nologo
+
+      - name: 确认清单里嵌入了 requireAdministrator
+        shell: powershell
+        run: |
+          $exe = 'src\LanMouseShare.App\bin\Release\LanMouseShare.exe'
+          if (-not (Test-Path $exe)) { throw "编译产物不存在：$exe" }
+          $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($exe))
+          if (-not $text.Contains('requireAdministrator')) { throw '清单里没有 requireAdministrator' }
+          Write-Host '清单校验通过。'
+
+      - name: 回环联调（19 项断言）
+        shell: powershell
+        run: |
+          $exe = Resolve-Path 'src\LanMouseShare.App\bin\Release\LanMouseShare.exe'
+          $log = Join-Path $env:LOCALAPPDATA ('LanMouseShare\logs\LanMouseShare-' + (Get-Date -Format 'yyyyMMdd') + '.log')
+          $p = Start-Process -FilePath $exe -ArgumentList '--nettest=5000' -PassThru -Wait
+          Write-Host "退出码：$($p.ExitCode)"
+          if (Test-Path $log) {
+            $text = [System.IO.File]::ReadAllText($log, [System.Text.Encoding]::UTF8)
+            $idx = $text.IndexOf('回环联调明细')
+            if ($idx -ge 0) { Write-Host $text.Substring($idx) }
+          }
+          if ($p.ExitCode -ne 0) { throw "回环联调失败，退出码 $($p.ExitCode)" }
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: LanMouseShare-build
+          path: |
+            src/LanMouseShare.App/bin/Release/LanMouseShare.exe
+          if-no-files-found: error

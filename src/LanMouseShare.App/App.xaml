@@ -1,0 +1,13 @@
+﻿<Application x:Class="LanMouseShare.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             ShutdownMode="OnExplicitShutdown">
+    <!--
+        这里故意不写 StartupUri：
+        窗口由 App.OnStartup 手动创建，以保证
+        「先设 DPI 感知 -> 再建 HWND -> 再建托盘图标」的顺序可控。
+        ShutdownMode 设为 OnExplicitShutdown：关闭主窗口只是隐藏到托盘，不退出进程。
+    -->
+    <Application.Resources>
+    </Application.Resources>
+</Application>

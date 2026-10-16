@@ -1,0 +1,13 @@
+# 生成物
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# 打包产物
+dist/
+
+# 工具生成的临时文件
+tools/_preview/
+tools/_probe*

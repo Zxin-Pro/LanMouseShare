@@ -1,0 +1,68 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
+  <assemblyIdentity version="1.0.0.0" name="LanMouseShare.app" type="win32" />
+
+  <!-- ============================ 权限 ============================
+       必须管理员权限：
+         * WH_MOUSE_LL / WH_KEYBOARD_LL 全局钩子在不提权时无法注入到
+           高完整性级别的进程（任务管理器、UAC 之后的程序等），会静默失效；
+         * SendInput 向其他进程发送输入也需要足够的完整性级别；
+         * 注册全局热键、读写本机配置同理。
+  -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+  <!-- ======================= 支持的 Windows 版本 =======================
+       supportedOS 决定 GetVersionEx / RtlGetVersion 返回哪个版本号。
+       缺了 Windows 10 的 GUID，Windows 10/11 会把自己谎报成 Windows 8。
+       这一段是 Win7 SP1 / Win10 / Win11 三平台兼容的基础。
+  -->
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows Vista -->
+      <supportedOS Id="{e2011457-1546-43c5-a5fe-008deee3d3f0}" />
+      <!-- Windows 7 -->
+      <supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}" />
+      <!-- Windows 8 -->
+      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}" />
+      <!-- Windows 8.1 -->
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}" />
+      <!-- Windows 10 / Windows 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+
+  <!-- ====================== DPI 感知（清单 + 运行时双保险） ======================
+       实测结论（C:\Users\zjh19\DSH\_dpi_probe 四个清单变体的对照实验）：
+         变体 A 无清单                        -> 初始感知 0（DPI_UNAWARE）
+         变体 B 仅有 supportedOS              -> 初始感知 0（DPI_UNAWARE）
+         变体 C dpiAware + dpiAwareness 声明  -> 初始感知 2（每显示器）
+         变体 D 只声明 system                 -> 初始感知 1（系统级）
+
+       而本程序（WPF）在完全没有 DPI 声明时，初始感知已经是 1（系统级），
+       导致运行时调用 SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2) 与
+       SetProcessDpiAwareness(PER_MONITOR) 全部返回 E_ACCESSDENIED —— 
+       感知级别一旦在进程启动时被设定就被锁死，运行时 API 无法再提高。
+
+       所以正确的做法是「清单声明 + 运行时兜底」两层：
+         * dpiAware（2005 命名空间）：Windows 7 / 8 / 8.1 认这个。
+           Win7 不支持每显示器 DPI，会把它当作系统级（这正是 Win7 想要的）。
+         * dpiAwareness（2016 命名空间）：Windows 10 1703+ 才认。
+           旧系统读到这段会整体忽略，不会报错。
+         * Core\Interop\DpiAwareness.cs 里的三级回退仍然保留并真实执行：
+           用于「清单缺失 / 被外部装载器忽略」的兜底场景，
+           并在被拒绝时回读真实感知级别，保证自检报告不说假话。
+  -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">permonitorv2,permonitor</dpiAwareness>
+    </windowsSettings>
+  </application>
+
+</assembly>
