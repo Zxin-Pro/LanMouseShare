@@ -68,6 +68,7 @@ powershell -ExecutionPolicy Bypass -File tools\package.ps1
 | --- | --- |
 | `--selftest=N` | 跑 N 秒自检后自动退出（0=通过，2=失败），结果写进日志 |
 | `--nettest=M` | 在本机回环地址上跑 M 毫秒超时的联调自检后自动退出，**不装钩子、不动真实鼠标** |
+| `--updatetest` | 真的去 GitHub 拉一次 Release 信息验证检查更新链路，然后自动退出 |
 | `--host` / `--client` | 指定启动角色 |
 | 无参数 | 正常启动图形界面 |
 
@@ -90,6 +91,7 @@ powershell -ExecutionPolicy Bypass -File tools\package.ps1
 - [使用手册](docs/使用手册.md) —— 怎么装、怎么配、出问题怎么办
 - [部署与安装](docs/部署与安装.md) —— 系统要求、Win7 装 .NET 4.8、防火墙放行
 - [技术架构](docs/技术架构.md) —— 分层结构、线程模型、关键设计决策
+- [代码审查与性能](docs/代码审查与性能.md) —— 兼容性核对、线程安全、内存与延迟审查、已知不足清单
 
 ## 许可
 

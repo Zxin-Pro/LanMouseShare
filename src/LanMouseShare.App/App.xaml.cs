@@ -12,6 +12,7 @@ using LanMouseShare.Core.Layout;
 using LanMouseShare.Core.Net;
 using LanMouseShare.Core.Sharing;
 using LanMouseShare.Core.Tray;
+using LanMouseShare.Core.Update;
 
 namespace LanMouseShare
 {
@@ -36,6 +37,8 @@ namespace LanMouseShare
         private int _selfTestSeconds;
         private int _netTestTimeoutMs;
         private bool _netTestPassed;
+        private bool _updateTest;
+        private bool _updateTestPassed;
         private bool _shuttingDown;
         private bool _sessionRunning;
 
@@ -56,6 +59,7 @@ namespace LanMouseShare
 
             _selfTestSeconds = ParseSelfTestSeconds(e.Args);
             _netTestTimeoutMs = ParseNetTestTimeout(e.Args);
+            _updateTest = HasFlag(e.Args, "--updatetest");
 
             Log.Info("========== LanMouseShare 启动 ==========");
             Log.Info("产品版本：" + ProcessEnvironment.GetProductVersionText());
@@ -94,6 +98,16 @@ namespace LanMouseShare
                 _netTestPassed = report.IndexOf("NETTEST RESULT: PASS", StringComparison.Ordinal) >= 0;
             }
 
+            if (_updateTest)
+            {
+                // 检查更新联调：真的去 GitHub 拉一次 Release 信息，验证 TLS / User-Agent /
+                // 版本比较 / 下载链接提取这一整条链路。会联网，所以只在显式传参时才跑。
+                Log.Info("已启用检查更新联调模式。");
+                UpdateInfo info = UpdateChecker.Check(15000);
+                Log.Info("检查更新明细：" + Environment.NewLine + info.Summarize());
+                _updateTestPassed = info.Succeeded;
+            }
+
             _session = new SharingSession();
             _session.Log += OnSessionLog;
             _session.ConnectedChanged += OnSessionConnected;
@@ -129,7 +143,7 @@ namespace LanMouseShare
                 updateTimer.Start();
             }
 
-            if (_netTestTimeoutMs > 0 && _selfTestSeconds <= 0)
+            if ((_netTestTimeoutMs > 0 || _updateTest) && _selfTestSeconds <= 0)
             {
                 DispatcherTimer netTimer = new DispatcherTimer();
                 netTimer.Interval = TimeSpan.FromSeconds(1);
@@ -169,7 +183,16 @@ namespace LanMouseShare
             {
                 timer.Stop();
             }
-            RequestExit(_netTestPassed ? 0 : 2);
+            bool ok = true;
+            if (_netTestTimeoutMs > 0)
+            {
+                ok = ok && _netTestPassed;
+            }
+            if (_updateTest)
+            {
+                ok = ok && _updateTestPassed;
+            }
+            RequestExit(ok ? 0 : 2);
         }
 
         private void OnDeferredUpdateTick(object sender, EventArgs e)
@@ -521,6 +544,23 @@ namespace LanMouseShare
         }
 
         /// <summary>解析 --nettest[=毫秒]，默认 5000 毫秒。</summary>
+        /// <summary>判断命令行里有没有某个纯开关（形如 --xxx）。</summary>
+        private static bool HasFlag(string[] args, string flag)
+        {
+            if (args == null)
+            {
+                return false;
+            }
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (args[i] != null && string.Equals(args[i], flag, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         private static int ParseNetTestTimeout(string[] args)
         {
             if (args == null)
