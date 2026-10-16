@@ -37,8 +37,29 @@ namespace LanMouseShare.Core.Layout
         /// <summary>回程守卫像素数（防抖核心参数）。</summary>
         public const int DefaultReturnGuard = 4;
 
-        /// <summary>重新居中触发区：主机光标进入距边缘这么多像素内就搬回中心。</summary>
-        public const int RecenterMargin = 8;
+        /// <summary>
+        /// 进入副机时的落脚内缩像素数（防抖的第二个核心参数，1.0.2 增加）。
+        ///
+        /// 为什么必须有它（真机反馈修出来的）：如果落脚点就是副机的 x=0，
+        /// 用户越过边缘之后手腕只要往回抖几像素（落在 ReturnGuard 以内），
+        /// 立刻就被判成回程，表现是「刚划过去就弹回来，副机上根本没法用」。
+        /// 落脚时先内缩这么多像素，回程就必须真的走完这一整段，
+        /// 手抖再也触发不了切换；而靠近边缘的像素依然全部可达，
+        /// 因为继续往回走仍然能走到 x=0，只是要走过这一段守卫带。
+        /// </summary>
+        public const int EntryGuard = 24;
+
+        /// <summary>
+        /// 贴合边的判定容差（像素）。
+        ///
+        /// 为什么不能要求光标「精确压在第 HostWidth-1 个像素上」：
+        /// 绝对坐标注入（SendInput + MOUSEEVENTF_ABSOLUTE）的归一化是
+        /// x = dx * 屏幕宽 / 65536，落点向下取整 —— 在 1920 宽的屏上最大只能
+        /// 落到 1918，**永远够不到 1919**。某些鼠标驱动、远程桌面、虚拟机
+        /// 也会把光标停在离边缘 1~2 像素的地方。要求精确贴边的直接后果就是
+        /// 「用户怎么划都过不去」。容差 2 像素肉眼察觉不到，判定却稳得多。
+        /// </summary>
+        public const int EdgeTolerance = 2;
 
         public ScreenSide Side { get; set; }
 
@@ -139,43 +160,44 @@ namespace LanMouseShare.Core.Layout
             switch (Side)
             {
                 case ScreenSide.Right:
-                    if (hostX < HostWidth - 1 || dx <= 0)
+                    if (hostX < HostWidth - 1 - EdgeTolerance || dx <= 0)
                     {
                         return false;
                     }
 
-                    remoteX = 0;                                  // 从此机的左边缘进入
+                    // 从副机左边缘稍稍内缩落脚，理由见 EntryGuard 的说明
+                    remoteX = Clamp(EntryGuard, 0, RemoteWidth - 1);
                     remoteY = Clamp(hostY - OffsetPixels, 0, RemoteHeight - 1);
                     return true;
 
                 case ScreenSide.Left:
-                    if (hostX > 0 || dx >= 0)
+                    if (hostX > EdgeTolerance || dx >= 0)
                     {
                         return false;
                     }
 
-                    remoteX = RemoteWidth - 1;                    // 从此机的右边缘进入
+                    remoteX = Clamp(RemoteWidth - 1 - EntryGuard, 0, RemoteWidth - 1);
                     remoteY = Clamp(hostY - OffsetPixels, 0, RemoteHeight - 1);
                     return true;
 
                 case ScreenSide.Above:
-                    if (hostY > 0 || dy >= 0)
+                    if (hostY > EdgeTolerance || dy >= 0)
                     {
                         return false;
                     }
 
                     remoteX = Clamp(hostX - OffsetPixels, 0, RemoteWidth - 1);
-                    remoteY = RemoteHeight - 1;                   // 从此机的下边缘进入
+                    remoteY = Clamp(RemoteHeight - 1 - EntryGuard, 0, RemoteHeight - 1);
                     return true;
 
                 default: // Below
-                    if (hostY < HostHeight - 1 || dy <= 0)
+                    if (hostY < HostHeight - 1 - EdgeTolerance || dy <= 0)
                     {
                         return false;
                     }
 
                     remoteX = Clamp(hostX - OffsetPixels, 0, RemoteWidth - 1);
-                    remoteY = 0;                                  // 从此机的上边缘进入
+                    remoteY = Clamp(EntryGuard, 0, RemoteHeight - 1);
                     return true;
             }
         }
@@ -245,22 +267,6 @@ namespace LanMouseShare.Core.Layout
         {
             remoteX = Clamp(remoteX, 0, RemoteWidth - 1);
             remoteY = Clamp(remoteY, 0, RemoteHeight - 1);
-        }
-
-        /// <summary>
-        /// 主机光标是否需要「重新居中」。为什么需要它：
-        /// 底层钩子只能拿到光标坐标，位移要靠前后两次坐标相减。光标一旦
-        /// 顶到屏幕边缘，系统会把坐标夹在边缘上，位移就再也读不出来 ——
-        /// 表现为「鼠标划到副机边缘就卡住不动了」。
-        /// 解法是在光标接近边缘时把它搬回屏幕中心，让位移永远有得读。
-        /// 因为此时用户正在看另一块屏幕，这个搬动在视觉上是不可见的。
-        /// </summary>
-        public bool NeedsRecenter(int hostX, int hostY)
-        {
-            return hostX <= RecenterMargin
-                   || hostY <= RecenterMargin
-                   || hostX >= HostWidth - 1 - RecenterMargin
-                   || hostY >= HostHeight - 1 - RecenterMargin;
         }
 
         public static int Clamp(int value, int min, int max)

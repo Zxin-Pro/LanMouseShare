@@ -33,8 +33,21 @@ namespace LanMouseShare
         private TrayIconService _tray;
         private MainWindow _mainWindow;
         private AppConfig _config;
+
+        /// <summary>
+        /// 从磁盘读出来的那份配置（命令行覆盖之前的快照）。
+        /// 它的唯一用途：命令行覆盖只该作用于本次进程，绝不能被顺手写回
+        /// config.json —— 1.0.1 就踩过这个坑：用 --client --peer=本机IP 联调
+        /// 一次，配置就被改成「角色=副机、自动开始=真、主机地址=本机」,
+        /// 之后每次开程序都对着自己反复重连、刷满日志。
+        /// </summary>
+        private AppConfig _baselineConfig;
+
+        /// <summary>被命令行覆盖过的字段名，保存前要把它们还原成基线值。</summary>
+        private readonly List<string> _ephemeralFields = new List<string>();
         private SharingSession _session;
         private int _selfTestSeconds;
+        private int _runForSeconds;
         private int _netTestTimeoutMs;
         private bool _netTestPassed;
         private bool _updateTest;
@@ -58,8 +71,14 @@ namespace LanMouseShare
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
             _selfTestSeconds = ParseSelfTestSeconds(e.Args);
+            _runForSeconds = ParseRunForSeconds(e.Args);
             _netTestTimeoutMs = ParseNetTestTimeout(e.Args);
             _updateTest = HasFlag(e.Args, "--updatetest");
+
+            if (_runForSeconds > 0)
+            {
+                Log.Info("已启用限时运行：" + _runForSeconds.ToString() + " 秒后自动退出（--runfor）。");
+            }
 
             Log.Info("========== LanMouseShare 启动 ==========");
             Log.Info("产品版本：" + ProcessEnvironment.GetProductVersionText());
@@ -86,6 +105,12 @@ namespace LanMouseShare
             {
                 Log.Warn("配置载入警告：" + warning);
             }
+
+            // 先记下磁盘上的原样，再让命令行覆盖内存里的这份。
+            _baselineConfig = _config.Clone();
+
+            ApplyCommandLineOverrides(e.Args);
+
             Log.Info("配置：" + _config.Describe());
             Log.Info("局域网地址：" + NetworkInfo.DescribeAll());
 
@@ -158,6 +183,28 @@ namespace LanMouseShare
                 timer.Tick += OnSelfTestTick;
                 timer.Start();
             }
+
+            if (_runForSeconds > 0)
+            {
+                // 供脚本化联调使用：到点自己退，省得留下一个提权进程占着 exe 不放，
+                // 下一次编译就会撞上 MSB3021「文件正由另一进程使用」。
+                DispatcherTimer runTimer = new DispatcherTimer();
+                runTimer.Interval = TimeSpan.FromSeconds(_runForSeconds);
+                runTimer.Tick += OnRunForTick;
+                runTimer.Start();
+            }
+        }
+
+        private void OnRunForTick(object sender, EventArgs e)
+        {
+            DispatcherTimer timer = sender as DispatcherTimer;
+            if (timer != null)
+            {
+                timer.Stop();
+            }
+
+            Log.Info("限时运行结束，准备退出。");
+            RequestExit(0);
         }
 
         private TrayMenuCallbacks BuildTrayCallbacks()
@@ -376,7 +423,134 @@ namespace LanMouseShare
                 (InputInjector.InputStructSize == 40 ? "64 位进程" : "32 位进程") + "），注入签名 0x" +
                 InputInjector.InjectionSignature.ToString("X"));
 
+            runner.Check("光标隐藏与恢复实测可用", CheckCursorHiding(),
+                "隐藏后显示计数 " + _cursorCountHidden + "（文档语义：< 0 即不画）"
+                + "，还原后回到 " + _cursorCountRestored + "（与隐藏前一致，没有漏还）");
+
+            runner.Check("边缘落脚点带防抖内缩", CheckEntryGuard(),
+                "EntryGuard = " + ScreenLayout.EntryGuard + " 像素，ReturnGuard = "
+                + ScreenLayout.DefaultReturnGuard + " 像素");
+
             return runner;
+        }
+
+        private static int _cursorCountHidden;
+        private static int _cursorCountRestored;
+
+        /// <summary>
+        /// 实测「把本机箭头藏起来」这件事真的做到。
+        ///
+        /// 为什么非要有这条断言：1.0.2 的核心改动就是主机控制副机期间隐藏箭头，
+        /// 而 ShowCursor 是引用计数语义 ——「我调用过了」和「真的藏起来了」是两件事。
+        ///
+        /// 判据取 ShowCursor 的文档定义：显示计数小于 0 时系统不画光标。
+        /// **刻意不用 GetCursorInfo**：提权实测证明它不反映这个计数（计数已经到 -4，
+        /// 它照样报 CURSOR_SHOWING；连 SetSystemCursor 换成全透明光标它也不变），
+        /// 拿它当判据只会得到一个永远失败的假警报。
+        /// DisplayCount 本身是非破坏性的（一升一降，净变化 0）。
+        /// </summary>
+        private static bool CheckCursorHiding()
+        {
+            try
+            {
+                // 先收掉上一轮异常可能留下的脏状态，避免误判
+                if (InputInjector.HiddenCursorCalls > 0)
+                {
+                    InputInjector.ShowCursor();
+                }
+
+                int before = InputInjector.DisplayCount;
+
+                InputInjector.HideCursor();
+                _cursorCountHidden = InputInjector.DisplayCount;
+
+                InputInjector.ShowCursor();
+                _cursorCountRestored = InputInjector.DisplayCount;
+
+                // 两条都要成立：藏的时候计数确实压到负，还的时候确实回到原值。
+                // 第二条防的是「藏了却没还干净」，那会让用户的箭头永远回不来。
+                return _cursorCountHidden < 0 && _cursorCountRestored == before;
+            }
+            catch (Exception)
+            {
+                try
+                {
+                    // 断言失败也必须把箭头还回去，绝不能把用户的鼠标弄丢
+                    InputInjector.ShowCursor();
+                }
+                catch (Exception)
+                {
+                }
+
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 验证「划过去」这条路上最容易出错的三个数字。
+        /// 1.0.1 的实测反馈是「划过去以后副机鼠标没法用」：根因就是旧代码
+        /// 把落脚点放在副机边缘 x=0，而回程判定只要往回 4 像素就成立，
+        /// 手腕一抖就弹回主机。EntryGuard 就是为这个加的。
+        /// </summary>
+        private static bool CheckEntryGuard()
+        {
+            ScreenLayout layout = new ScreenLayout();
+            layout.HostWidth = 1920;
+            layout.HostHeight = 1080;
+            layout.RemoteWidth = 1920;
+            layout.RemoteHeight = 1080;
+            layout.Side = ScreenSide.Right;
+
+            int remoteX;
+            int remoteY;
+            // 贴着主机右边缘，再往右走 5 像素 —— 这就是「划过边缘」那一瞬间
+            if (!layout.TryExitHost(1919, 600, 5, 0, out remoteX, out remoteY))
+            {
+                return false;
+            }
+
+            // 落脚点必须离副机左边缘有一整段 EntryGuard，回程得真走完它
+            if (remoteX != ScreenLayout.EntryGuard)
+            {
+                return false;
+            }
+
+            // 刚进去就判「划回来了」的话，副机上根本没法用
+            int hostX;
+            int hostY;
+            if (layout.TryExitRemote(remoteX, remoteY, out hostX, out hostY))
+            {
+                return false;
+            }
+
+            // 反过来，真的走回副机边缘时又必须放行，否则就回不来了
+            if (!layout.TryExitRemote(-5, remoteY, out hostX, out hostY))
+            {
+                return false;
+            }
+
+            // 回程落脚点要停在距主机边缘 ReturnGuard 处，防止立刻又穿过去
+            if (hostX != 1919 - ScreenLayout.DefaultReturnGuard)
+            {
+                return false;
+            }
+
+            // 贴合边判定必须留 EdgeTolerance 的容差：绝对坐标注入、某些鼠标驱动、
+            // 远程桌面都会把光标停在离边缘 1~2 像素处，要求精确压在第 1919 个
+            // 像素上的结果是「用户怎么划都过不去」。
+            if (!layout.TryExitHost(1920 - 1 - ScreenLayout.EdgeTolerance, 600, 5, 0, out remoteX, out remoteY))
+            {
+                return false;
+            }
+
+            // 但容差不能无限放宽：离边缘再远一格就必须判为「没过」
+            if (layout.TryExitHost(1920 - 2 - ScreenLayout.EdgeTolerance, 600, 5, 0, out remoteX, out remoteY))
+            {
+                return false;
+            }
+
+            // 方向也必须对：在边缘上但往屏幕里走，绝不能穿越
+            return !layout.TryExitHost(1919, 600, -5, 0, out remoteX, out remoteY);
         }
 
         private bool CheckConfigRoundTrip()
@@ -559,6 +733,183 @@ namespace LanMouseShare
                 }
             }
             return false;
+        }
+
+        /// <summary>
+        /// 命令行覆盖配置。
+        ///
+        /// 存在的意义：两台电脑之间来回调参数（换角色、换 IP、换端口、换布局）时
+        /// 不用反复去改 %LOCALAPPDATA% 下的 config.json。这些覆盖只作用于本次进程，
+        /// 界面上不点保存就不会写回文件。
+        ///
+        ///   --host / --client        指定角色，并且要求启动后立刻开始共享
+        ///   --peer=192.168.1.2       副机填的主机地址
+        ///   --port=24800             端口
+        ///   --key=lms-24800          连接密钥
+        ///   --side=right|left|above|below  副机相对主机的方位
+        /// </summary>
+        private void ApplyCommandLineOverrides(string[] args)
+        {
+            if (HasFlag(args, "--host"))
+            {
+                _config.Role = "host";
+                _config.AutoStart = true;
+                MarkEphemeral("Role");
+                MarkEphemeral("AutoStart");
+                Log.Info("命令行指定角色：主机（--host），本次启动会自动开始共享。");
+            }
+            else if (HasFlag(args, "--client"))
+            {
+                _config.Role = "client";
+                _config.AutoStart = true;
+                MarkEphemeral("Role");
+                MarkEphemeral("AutoStart");
+                Log.Info("命令行指定角色：副机（--client），本次启动会自动开始共享。");
+            }
+
+            string peer = GetArgValue(args, "--peer");
+            if (peer != null)
+            {
+                _config.PeerHost = peer;
+                MarkEphemeral("PeerHost");
+                Log.Info("命令行指定主机地址：" + peer + "（只用于本次启动，不会写进配置文件）");
+            }
+
+            string key = GetArgValue(args, "--key");
+            if (key != null)
+            {
+                _config.PairingKey = key;
+                MarkEphemeral("PairingKey");
+                Log.Info("命令行指定连接密钥（只用于本次启动，不会写进配置文件）。");
+            }
+
+            string portText = GetArgValue(args, "--port");
+            if (portText != null)
+            {
+                int port;
+                if (int.TryParse(portText, out port) && port >= AppConfig.MinPort && port <= AppConfig.MaxPort)
+                {
+                    _config.Port = port;
+                    MarkEphemeral("Port");
+                    Log.Info("命令行指定端口：" + port.ToString() + "（只用于本次启动）");
+                }
+                else
+                {
+                    Log.Warn("命令行端口参数无效，已忽略：" + portText);
+                }
+            }
+
+            string side = GetArgValue(args, "--side");
+            if (side != null)
+            {
+                _config.Side = AppConfig.ParseSide(side);
+                MarkEphemeral("Side");
+                Log.Info("命令行指定屏幕方位：" + AppConfig.SideToChinese(_config.Side) + "（只用于本次启动）");
+            }
+        }
+
+        private void MarkEphemeral(string fieldName)
+        {
+            if (fieldName != null && !_ephemeralFields.Contains(fieldName))
+            {
+                _ephemeralFields.Add(fieldName);
+            }
+        }
+
+        /// <summary>
+        /// 用户在界面上真的动了设置控件：从这一刻起命令行覆盖不再特殊，
+        /// 界面上的值就是用户想要的，照常写回文件。
+        /// </summary>
+        public void ClearEphemeralOverrides()
+        {
+            if (_ephemeralFields.Count > 0)
+            {
+                _ephemeralFields.Clear();
+            }
+        }
+
+        /// <summary>
+        /// 拿到一份「可以安全写进磁盘」的配置副本。
+        /// 被命令行覆盖过的字段会还原成磁盘上的原值，其余的照抄现场值。
+        /// 刻意返回副本而不是改 live 那份：调用它的时机是「马上就要写文件」，
+        /// 不能顺手把进程正在用的配置也改掉。
+        /// </summary>
+        public AppConfig ConfigForSave(AppConfig live)
+        {
+            if (live == null || _baselineConfig == null || _ephemeralFields.Count == 0)
+            {
+                return live;
+            }
+
+            AppConfig copy = live.Clone();
+            for (int i = 0; i < _ephemeralFields.Count; i++)
+            {
+                switch (_ephemeralFields[i])
+                {
+                    case "Role":
+                        copy.Role = _baselineConfig.Role;
+                        break;
+                    case "AutoStart":
+                        copy.AutoStart = _baselineConfig.AutoStart;
+                        break;
+                    case "PeerHost":
+                        copy.PeerHost = _baselineConfig.PeerHost;
+                        break;
+                    case "PairingKey":
+                        copy.PairingKey = _baselineConfig.PairingKey;
+                        break;
+                    case "Port":
+                        copy.Port = _baselineConfig.Port;
+                        break;
+                    case "Side":
+                        copy.Side = _baselineConfig.Side;
+                        break;
+                }
+            }
+
+            return copy;
+        }
+
+        /// <summary>取 --name=value 形式的参数值；没写或者值空则返回 null。</summary>
+        private static string GetArgValue(string[] args, string name)
+        {
+            if (args == null)
+            {
+                return null;
+            }
+
+            string prefix = name + "=";
+            for (int i = 0; i < args.Length; i++)
+            {
+                string arg = args[i];
+                if (arg == null || !arg.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                string value = arg.Substring(prefix.Length).Trim();
+                return value.Length == 0 ? null : value;
+            }
+
+            return null;
+        }
+
+        /// <summary>解析 --runfor=秒，到时自动退出。0 表示不限时。</summary>
+        private static int ParseRunForSeconds(string[] args)
+        {
+            string raw = GetArgValue(args, "--runfor");
+            if (raw == null)
+            {
+                return 0;
+            }
+
+            int seconds;
+            if (int.TryParse(raw, out seconds) && seconds >= 3 && seconds <= 86400)
+            {
+                return seconds;
+            }
+
+            return 0;
         }
 
         private static int ParseNetTestTimeout(string[] args)

@@ -217,6 +217,95 @@ namespace LanMouseShare.Core.Input
             }
         }
 
+        // ------------------------------------------------------------ 光标可见性
+
+        /// <summary>
+        /// 光标显示计数被我们扣掉了几层（ShowCursor 是引用计数语义）。
+        /// 主机控制副机期间必须把自己的箭头藏起来，否则用户会在主机屏幕上
+        /// 看见一个到处乱跑的鼠标（1.0.2 的真机反馈就是这么报的）。
+        /// </summary>
+        private static int _cursorHides;
+
+        public static int HiddenCursorCalls
+        {
+            get { return _cursorHides; }
+        }
+
+        /// <summary>
+        /// 把本机光标藏起来。ShowCursor 维护的是显示计数，别的程序可能已经
+        /// 把它加回去过，所以要在循环里一路调到返回负值为止。
+        /// 返回当前累计扣掉的层数（恢复时要原样还回去）。
+        /// </summary>
+        public static int HideCursor()
+        {
+            int guard = 0;
+            int level;
+            do
+            {
+                level = NativeMethods.ShowCursor(false);
+                _cursorHides++;
+            }
+            while (level >= 0 && ++guard < 32);
+
+            return _cursorHides;
+        }
+
+        /// <summary>把 HideCursor 扣掉的光标原样还回去。重复调用是安全的。</summary>
+        public static int ShowCursor()
+        {
+            int calls = _cursorHides;
+            for (int i = 0; i < calls; i++)
+            {
+                NativeMethods.ShowCursor(true);
+            }
+
+            _cursorHides = 0;
+            return calls;
+        }
+
+        /// <summary>
+        /// 非破坏性地读出 Windows 内部的光标**显示计数**。
+        ///
+        /// 做法：先 ShowCursor(true) 拿到新值（= C+1），紧跟着 ShowCursor(false)
+        /// 把它原样还原，净变化为 0 —— 所以调用它不会影响光标状态。
+        ///
+        /// 为什么必须绕这一道：GetCursorInfo 的 CURSOR_SHOWING **并不反映这个计数**。
+        /// 提权实测（`lms-cursor-probe.ps1`）：连续 ShowCursor(false) 的返回值一路是
+        /// -1 / -2 / -3 / -4（计数确实压到负了），而同一线程上的 GetCursorInfo
+        /// 依旧报 flags=0x1 SHOWING=True、hCursor 不变；连 SetSystemCursor 换成
+        /// 全透明光标之后它还是这么报。所以「藏起来了没有」只能用文档定义的机制本身
+        /// 来验证，不能拿 GetCursorInfo 当证据。
+        /// </summary>
+        public static int DisplayCount
+        {
+            get
+            {
+                int up = NativeMethods.ShowCursor(true);
+                NativeMethods.ShowCursor(false);
+                return up - 1;
+            }
+        }
+
+        /// <summary>
+        /// 光标此刻是否画着（GetCursorInfo 口径）。
+        ///
+        /// **注意：它不是「我们藏成功了没有」的判据**（原因见 DisplayCount 的注释）。
+        /// 保留它只是为了拿到 hCursor 和坐标做别的诊断，自检里不要再用它判定隐藏。
+        /// cbSize 必须现算：x86 = 20、x64 = 24。
+        /// </summary>
+        public static bool IsCursorVisible()
+        {
+            NativeMethods.CURSORINFO info = default(NativeMethods.CURSORINFO);
+            info.cbSize = Marshal.SizeOf(typeof(NativeMethods.CURSORINFO));
+            if (!NativeMethods.GetCursorInfo(ref info))
+            {
+                // 查不到就保守地当成「可见」，不要谎报成功
+                return true;
+            }
+
+            return (info.flags & NativeMethods.CursorShowing) != 0;
+        }
+
         // ------------------------------------------------------------ 内部
 
         private static bool Send(NativeMethods.INPUT input)

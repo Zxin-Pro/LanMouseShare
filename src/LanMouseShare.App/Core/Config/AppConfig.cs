@@ -25,6 +25,9 @@ namespace LanMouseShare.Core.Config
         public const int MinPort = 1024;
         public const int MaxPort = 65535;
 
+        /// <summary>默认端口。选这个值的理由：落在动态端口区间之上，常见的 3389/5900/24800 不冲突。</summary>
+        public const int DefaultPort = 24800;
+
         /// <summary>启动角色：host / client。</summary>
         public string Role { get; set; }
 
@@ -64,7 +67,7 @@ namespace LanMouseShare.Core.Config
         public AppConfig()
         {
             Role = "host";
-            Port = 24800;
+            Port = DefaultPort;
             PairingKey = "lms-24800";
             PeerHost = "192.168.1.2";
             Side = ScreenSide.Right;

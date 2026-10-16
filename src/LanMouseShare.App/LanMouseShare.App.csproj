@@ -84,6 +84,8 @@
     <Compile Include="Core\Json\Json.cs" />
     <Compile Include="Core\Config\AppConfig.cs" />
     <Compile Include="Core\Net\NetworkInfo.cs" />
+    <Compile Include="Core\Net\FirewallHelper.cs" />
+    <Compile Include="Core\Net\ConnectivityProbe.cs" />
     <Compile Include="Core\Update\UpdateChecker.cs" />
     <Compile Include="Core\Input\InputTypes.cs" />
     <Compile Include="Core\Input\VirtualScreen.cs" />

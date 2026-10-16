@@ -226,6 +226,39 @@ namespace LanMouseShare.Core.Interop
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool GetCursorPos(out POINT lpPoint);
 
+        // ---- 光标显示与可见性（1.0.2：主机控制副机时要把自己的箭头藏起来）----
+        //
+        // ShowCursor 维护的是一个**显示计数**：每调一次 false 减 1，每调一次
+        // true 加 1，只有计数为负光标才真的不画。别的程序可能已经把它加回去过，
+        // 所以只能一路调到返回负值为止 —— 这也是几乎所有远控/多屏软件的做法。
+
+        /// <summary>光标显示计数 +1（bShow=true）或 -1（false），返回调用后的新计数。</summary>
+        [DllImport("user32.dll")]
+        internal static extern int ShowCursor(bool bShow);
+
+        internal const int CursorShowing = 0x00000001;
+
+        /// <summary>
+        /// 注意 cbSize 必须用 Marshal.SizeOf 现算：x86 = 20、x64 = 24，
+        /// 写死常量正是本项目在 AnyCPU 下反复强调要避免的错误。
+        /// </summary>
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct CURSORINFO
+        {
+            public int cbSize;
+            public int flags;
+            public IntPtr hCursor;
+            public POINT ptScreenPos;
+        }
+
+        /// <summary>
+        /// 查询光标真实状态（flags 含 CursorShowing 表示此刻确实画着光标）。
+        /// 用它来**验证**隐藏有没有生效，而不是假设调用过就一定生效。
+        /// </summary>
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetCursorInfo(ref CURSORINFO pci);
+
         // ==================================================================
         //  低级钩子 —— 第四阶段：鼠标/键盘捕获代理
         // ==================================================================

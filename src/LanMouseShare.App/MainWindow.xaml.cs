@@ -40,6 +40,13 @@ namespace LanMouseShare
         private bool _initializing = true;
         private bool _exitRequested;
         private UpdateInfo _lastUpdate;
+        private List<KeyValuePair<string, string>> _diagnosticsRows;
+        private string _lanAddressSummary = "（正在检测……）";
+        private string _firewallSummary = "（正在检测……）";
+
+        /// <summary>本次运行里是否已经确认过防火墙放行（避免每次开始共享都跑一遍 netsh）。</summary>
+        private bool _firewallEnsured;
+        private bool _envProbeRunning;
 
         public MainWindow()
         {
@@ -64,6 +71,25 @@ namespace LanMouseShare
             _config = config;
             _session = session;
             _host = host;
+
+            // 把窗口的 Dispatcher 交给核心层，让「恢复主机光标」这类动作
+            // 能从网络线程回到装钩子的那条线程上执行（见 HostController.OnHookThread）。
+            _session.UiDispatch = delegate(Action action)
+            {
+                if (action == null)
+                {
+                    return;
+                }
+
+                if (Dispatcher.CheckAccess())
+                {
+                    action();
+                }
+                else
+                {
+                    Dispatcher.BeginInvoke(action);
+                }
+            };
 
             _session.Log += OnSessionLog;
             _session.ConnectedChanged += OnSessionConnected;
@@ -188,6 +214,12 @@ namespace LanMouseShare
                 return;
             }
 
+            // 用户是真的在改设置了：命令行覆盖从这一刻起不再特殊。
+            if (_host != null)
+            {
+                _host.ClearEphemeralOverrides();
+            }
+
             _saveTimer.Stop();
             _saveTimer.Start();
         }
@@ -207,8 +239,17 @@ namespace LanMouseShare
 
             CollectToConfig();
 
+            // 命令行覆盖（--host / --client / --peer= / --key= / --port= / --side=）
+            // 只作用于本次进程，写盘前必须把那些字段还原成磁盘上的原值，
+            // 否则联调一次就会把用户的配置永久改坏（1.0.1 的真实事故）。
+            AppConfig toSave = _config;
+            if (_host != null)
+            {
+                toSave = _host.ConfigForSave(_config);
+            }
+
             string error;
-            if (!_config.Save(out error))
+            if (!toSave.Save(out error))
             {
                 Log.Warn(error);
                 FooterStatus.Text = error;
@@ -259,6 +300,12 @@ namespace LanMouseShare
 
             RefreshPills();
             RefreshLayoutSummary();
+
+            if (options.Role == SessionRole.Host)
+            {
+                EnsureHostFirewallAsync(_config.Port);
+            }
+
             return true;
         }
 
@@ -419,6 +466,185 @@ namespace LanMouseShare
         private void OnForceReturn(object sender, RoutedEventArgs e)
         {
             ForceReturnLocal();
+        }
+
+        // ---------------------------------------------------------------- 联网排查
+
+        /// <summary>
+        /// 「测试到主机的连通性」。
+        /// 探测本身会阻塞最多 3 秒，所以放到线程池上跑，结果再回 UI 线程显示 ——
+        /// 不能直接在点击处理器里同步做，否则窗口在这 3 秒里是假死的，用户会以为程序崩了。
+        /// </summary>
+        private void OnTestConnection(object sender, RoutedEventArgs e)
+        {
+            string host = PeerHostBox == null ? string.Empty : PeerHostBox.Text;
+            int port = ReadPort();
+
+            ShowConnTest("正在测试 " + (host == null ? string.Empty : host.Trim()) + ":" + port.ToString() + " ……");
+
+            ThreadPool.QueueUserWorkItem(delegate(object state)
+            {
+                string report;
+                try
+                {
+                    report = ConnectivityProbe.Probe(host, port);
+                }
+                catch (Exception ex)
+                {
+                    report = "探测过程出错：" + ex.Message;
+                }
+
+                AppendLogOnUi("连通性测试：" + Environment.NewLine + report);
+                ShowConnTestOnUi(report);
+            });
+        }
+
+        /// <summary>
+        /// 主机开始共享时自动确认防火墙放行，不再指望 Windows 那个弹窗。
+        ///
+        /// 为什么不能靠弹窗：Win10 / Win11 对已经带管理员清单、又主动 Listen
+        /// 的进程，经常一声不吭就把入站包丢掉 —— 用户看到的现象正是
+        /// 「根本没跳防火墙提示，副机就是连不上」。程序本来就有管理员权限，
+        /// 自己把规则写好更可靠，而且能如实把结果写进日志让用户看见。
+        ///
+        /// 跑在线程池上：netsh 是子进程，最坏要好几秒，放 UI 线程会让窗口假死。
+        /// </summary>
+        private void EnsureHostFirewallAsync(int port)
+        {
+            if (_firewallEnsured)
+            {
+                return;
+            }
+
+            ThreadPool.QueueUserWorkItem(delegate(object state)
+            {
+                string summary;
+                bool ok;
+
+                try
+                {
+                    if (FirewallHelper.RuleExists(port) && FirewallHelper.ProgramRuleExists())
+                    {
+                        _firewallEnsured = true;
+                        ok = true;
+                        summary = "防火墙放行：入站 TCP " + port.ToString() + " 的规则已经在了，不需要重复添加。";
+                    }
+                    else
+                    {
+                        string error;
+                        ok = FirewallHelper.EnsureAll(port, out error);
+                        if (ok)
+                        {
+                            _firewallEnsured = true;
+                            summary = "防火墙放行：已自动添加规则（入站 TCP " + port.ToString()
+                                      + "，域 / 专用 / 公用 三个配置文件全部放行）。";
+                            if (!string.IsNullOrEmpty(error))
+                            {
+                                summary = summary + " 程序规则没能加上：" + error;
+                            }
+                        }
+                        else
+                        {
+                            summary = "防火墙放行失败：" + (error == null ? "未知原因" : error)
+                                      + "。副机很可能连不上，请右键以管理员身份运行本程序再试。";
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ok = false;
+                    summary = "防火墙放行时出错：" + ex.Message;
+                }
+
+                AppendLogOnUi(summary);
+                Log.Info(summary);
+
+                _firewallSummary = summary;
+                ApplyProbeResults();
+
+                if (!ok)
+                {
+                    ShowConnTestOnUi(summary);
+                }
+            });
+        }
+
+        /// <summary>一键放行防火墙。程序本来就有管理员权限，不需要再弹 UAC。</summary>
+        private void OnAllowFirewall(object sender, RoutedEventArgs e)
+        {
+            int port = ReadPort();
+            ShowConnTest("正在为入站 TCP " + port.ToString() + " 添加防火墙放行规则……");
+
+            ThreadPool.QueueUserWorkItem(delegate(object state)
+            {
+                string error;
+                bool ok;
+                try
+                {
+                    ok = FirewallHelper.EnsureAll(port, out error);
+                }
+                catch (Exception ex)
+                {
+                    ok = false;
+                    error = ex.Message;
+                }
+
+                string report;
+                if (ok)
+                {
+                    report = "✔ 已经放行入站 TCP " + port.ToString() + "（所有网络配置文件：域 / 专用 / 公用）。"
+                             + Environment.NewLine + FirewallHelper.Describe(port)
+                             + Environment.NewLine + Environment.NewLine
+                             + "如果之前是副机连不上主机，现在再让副机重试一次。";
+                    if (!string.IsNullOrEmpty(error))
+                    {
+                        report = report + Environment.NewLine + "（提示：" + error + "）";
+                    }
+                }
+                else
+                {
+                    report = "✘ 放行失败：" + error + Environment.NewLine
+                             + "可以在管理员命令提示符里手工执行：" + Environment.NewLine
+                             + "netsh advfirewall firewall add rule name=\"LanMouseShare\" dir=in action=allow protocol=TCP localport="
+                             + port.ToString();
+                }
+
+                AppendLogOnUi("防火墙放行：" + Environment.NewLine + report);
+                ShowConnTestOnUi(report);
+            });
+        }
+
+        private int ReadPort()
+        {
+            int port;
+            if (PortBox != null && int.TryParse(PortBox.Text.Trim(), out port)
+                && port >= AppConfig.MinPort && port <= AppConfig.MaxPort)
+            {
+                return port;
+            }
+
+            return AppConfig.DefaultPort;
+        }
+
+        private void ShowConnTest(string text)
+        {
+            if (ConnTestBox == null)
+            {
+                return;
+            }
+
+            ConnTestBox.Text = text;
+            ConnTestBox.Visibility = Visibility.Visible;
+        }
+
+        private void ShowConnTestOnUi(string text)
+        {
+            Dispatcher.BeginInvoke(new Action<string>(ShowConnTest), text);
+        }
+
+        private void AppendLogOnUi(string text)
+        {
+            Dispatcher.BeginInvoke(new Action<string>(AppendLog), text);
         }
 
         private void OnKeyboardChanged(object sender, RoutedEventArgs e)
@@ -849,9 +1075,88 @@ namespace LanMouseShare
             rows.Add(new KeyValuePair<string, string>("配置文件", AppConfig.FilePath));
             rows.Add(new KeyValuePair<string, string>("日志文件", Log.CurrentFile == null ? "（不可用）" : Log.CurrentFile));
             rows.Add(new KeyValuePair<string, string>("计算机名", Environment.MachineName));
+            rows.Add(new KeyValuePair<string, string>("本机局域网地址", _lanAddressSummary));
+            rows.Add(new KeyValuePair<string, string>("防火墙放行", _firewallSummary));
             rows.Add(new KeyValuePair<string, string>("自检结果", _selfTest == null ? "尚未运行" : _selfTest.Summary));
 
+            _diagnosticsRows = rows;
             DiagnosticsList.ItemsSource = rows;
+            StartEnvironmentProbe();
+        }
+
+        /// <summary>
+        /// 在后台线程探测局域网地址与防火墙规则，探测完再回 UI 线程补进列表。
+        /// 为什么不在 UI 线程直接算：FirewallHelper 要起 netsh 子进程，最坏会阻塞十几秒，
+        /// 直接算会让点开「诊断」页时窗口卡住不动。
+        /// </summary>
+        private void StartEnvironmentProbe()
+        {
+            if (_envProbeRunning)
+            {
+                return;
+            }
+
+            _envProbeRunning = true;
+            int port = ReadPort();
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    _lanAddressSummary = NetworkInfo.DescribeAll();
+                }
+                catch (Exception ex)
+                {
+                    _lanAddressSummary = "检测失败：" + ex.Message;
+                }
+
+                try
+                {
+                    _firewallSummary = FirewallHelper.Describe(port);
+                }
+                catch (Exception ex)
+                {
+                    _firewallSummary = "检测失败：" + ex.Message;
+                }
+
+                _envProbeRunning = false;
+                ApplyProbeResults();
+            });
+        }
+
+        private void ApplyProbeResults()
+        {
+            try
+            {
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    if (_diagnosticsRows == null)
+                    {
+                        return;
+                    }
+
+                    for (int i = 0; i < _diagnosticsRows.Count; i++)
+                    {
+                        string key = _diagnosticsRows[i].Key;
+                        if (key == "本机局域网地址")
+                        {
+                            _diagnosticsRows[i] = new KeyValuePair<string, string>(key, _lanAddressSummary);
+                        }
+                        else if (key == "防火墙放行")
+                        {
+                            _diagnosticsRows[i] = new KeyValuePair<string, string>(key, _firewallSummary);
+                        }
+                    }
+
+                    // ItemsSource 绑的是普通 List，没有变更通知，只能整表重挂一次。
+                    DiagnosticsList.ItemsSource = null;
+                    DiagnosticsList.ItemsSource = _diagnosticsRows;
+                }));
+            }
+            catch (Exception)
+            {
+                // 窗口正在销毁时 BeginInvoke 会失败，忽略即可。
+            }
         }
 
         private void OnRefreshClick(object sender, RoutedEventArgs e)

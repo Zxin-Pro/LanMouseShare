@@ -184,6 +184,17 @@
                                     <Button x:Name="ReturnButton" Content="强制鼠标回本机" Style="{StaticResource PlainButton}"
                                             Click="OnForceReturn" Margin="10,0,0,0" />
                                 </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                    <Button x:Name="TestConnectionButton" Content="测试到主机的连通性"
+                                            Style="{StaticResource PlainButton}" Click="OnTestConnection" MinWidth="150" />
+                                    <Button x:Name="FirewallButton" Content="放行防火墙"
+                                            Style="{StaticResource PlainButton}" Click="OnAllowFirewall" Margin="10,0,0,0" MinWidth="110" />
+                                    <Button x:Name="OpenLogButton" Content="打开日志"
+                                            Style="{StaticResource PlainButton}" Click="OnOpenLogFile" Margin="10,0,0,0" />
+                                </StackPanel>
+                                <TextBox x:Name="ConnTestBox" Margin="0,10,0,0" Height="140" IsReadOnly="True"
+                                         TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto"
+                                         BorderBrush="{StaticResource LineBrush}" Visibility="Collapsed" />
                                 <CheckBox x:Name="KeyboardCheck" Content="同时共享键盘（鼠标共享稳定后再开）"
                                           Margin="0,14,0,4" Checked="OnKeyboardChanged" Unchecked="OnKeyboardChanged" />
                                 <CheckBox x:Name="ReconnectCheck" Content="断线后自动重连（每 3 秒重试）"

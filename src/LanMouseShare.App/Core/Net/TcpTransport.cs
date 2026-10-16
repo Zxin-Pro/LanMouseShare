@@ -40,6 +40,12 @@ namespace LanMouseShare.Core.Net
             get { return _stream != null; }
         }
 
+        /// <summary>监听套接字是否处于打开状态（主机角色专用）。</summary>
+        public bool IsListening
+        {
+            get { return _listener != null; }
+        }
+
         // ---------------------------------------------------------------- 监听
 
         public void StartListen(int port)
@@ -56,24 +62,71 @@ namespace LanMouseShare.Core.Net
             StartThread("lms-accept", AcceptLoop);
         }
 
+        /// <summary>
+        /// 主机侧接入循环。
+        ///
+        /// 一次会话结束后必须回到 Accept 状态继续等下一个对端 —— 早期版本只接一次，
+        /// 副机断线或重启之后主机就再也接不进来了（监听套接字还开着，但没人在 Accept），
+        /// 表现出来正是「两台电脑死活连不上」。
+        /// </summary>
         private void AcceptLoop()
         {
-            try
+            while (_running)
             {
-                TcpClient client = _listener.AcceptTcpClient();
-                Configure(client);
-                _client = client;
-                _stream = client.GetStream();
-                RaiseState("对端已接入：" + Describe(client));
-                StartThread("lms-read", ReadLoop);
-            }
-            catch (Exception ex)
-            {
+                TcpClient client;
+                Thread reader = null;
+
+                try
+                {
+                    TcpListener listener = _listener;
+                    if (listener == null)
+                    {
+                        break;
+                    }
+
+                    client = listener.AcceptTcpClient();
+                    Configure(client);
+                    _client = client;
+                    _stream = client.GetStream();
+                    RaiseState("对端已接入：" + Describe(client));
+                    reader = StartThread("lms-read", ReadLoop);
+                }
+                catch (Exception ex)
+                {
+                    if (_running)
+                    {
+                        RaiseFailed(ex);
+                    }
+
+                    break;
+                }
+
+                if (reader != null)
+                {
+                    // 等这次会话彻底结束，再回去接下一个。
+                    reader.Join();
+                }
+
+                CloseSession();
+
                 if (_running)
                 {
-                    RaiseFailed(ex);
+                    RaiseState("等待下一个对端连接");
                 }
             }
+        }
+
+        /// <summary>只关掉当前这一次会话，保留监听套接字。</summary>
+        private void CloseSession()
+        {
+            try { if (_stream != null) { _stream.Close(); } }
+            catch (Exception) { }
+
+            try { if (_client != null) { _client.Close(); } }
+            catch (Exception) { }
+
+            _stream = null;
+            _client = null;
         }
 
         // ---------------------------------------------------------------- 连接
@@ -268,12 +321,13 @@ namespace LanMouseShare.Core.Net
 
         // ---------------------------------------------------------------- 事件
 
-        private void StartThread(string name, ThreadStart body)
+        private Thread StartThread(string name, ThreadStart body)
         {
             Thread t = new Thread(body);
             t.IsBackground = true;
             t.Name = name;
             t.Start();
+            return t;
         }
 
         private void RaiseState(string text)

@@ -61,6 +61,12 @@ namespace LanMouseShare.Core.Sharing
 
         public SessionRole Role { get; private set; }
 
+        /// <summary>
+        /// 由宿主层（WPF 主窗口）注入的线程调度器，用来把核心层的动作送回 UI 线程。
+        /// 核心层是纯 .NET 类库式的写法，不引用 WPF，所以只能这样把 Dispatcher 传进来。
+        /// </summary>
+        public Action<Action> UiDispatch { get; set; }
+
         public HostController Host
         {
             get { return _host; }
@@ -126,6 +132,10 @@ namespace LanMouseShare.Core.Sharing
                 if (options.Role == SessionRole.Host)
                 {
                     _host = new HostController(_peer, _pump, _hooks);
+                    // 宿主层（WPF）如果注入了线程调度器，就转交给主机控制器。
+                    // 需要它的原因见 HostController.OnHookThread：ShowCursor 的
+                    // 显示计数是按线程记的，断线兜底必须回到装钩子那条线程上还。
+                    _host.UiDispatch = UiDispatch;
                     _host.Layout = options.Layout ?? new ScreenLayout();
                     _host.Layout.HostWidth = VirtualScreen.PrimaryWidth;
                     _host.Layout.HostHeight = VirtualScreen.PrimaryHeight;

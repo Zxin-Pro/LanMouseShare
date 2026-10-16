@@ -185,6 +185,15 @@ namespace LanMouseShare.Core.Net
 
             if (!_transport.IsConnected)
             {
+                // 主机角色：监听套接字建好之后就该一直等着，AcceptLoop 自己会接下一个对端。
+                // 早期版本这里每秒都会调一次 Reconnect()，而 StartListen 内部第一件事就是 Close()，
+                // 结果是「每秒把 24800 端口关闭再打开」：副机恰好撞上关闭窗口就被拒，
+                // 而且 WSACancelBlockingCall 会在日志里刷出一堆看起来像故障的假异常。
+                if (_role == PeerRole.Host && _transport.IsListening)
+                {
+                    return;
+                }
+
                 if (_autoReconnect && now >= _nextReconnectAtMs)
                 {
                     Reconnect();
@@ -405,7 +414,13 @@ namespace LanMouseShare.Core.Net
             {
                 _authenticated = false;
                 RaiseConnected(false);
-                ScheduleReconnect();
+
+                // 只有副机才需要主动重连。主机角色下 AcceptLoop 已经回到 Accept 状态继续等，
+                // 这里再排一次重连只会把好好的监听套接字拆掉重建，反而制造连接失败窗口。
+                if (_role == PeerRole.Client)
+                {
+                    ScheduleReconnect();
+                }
             }
             else if (text != null && text.IndexOf("对端已接入", StringComparison.Ordinal) >= 0)
             {

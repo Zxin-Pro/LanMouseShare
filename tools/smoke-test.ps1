@@ -98,7 +98,17 @@ function Invoke-Round {
         $forcedKill = $true
         Write-Host '[smoke] 等待超时，强制结束进程'
         try { $process.Kill() } catch { }
-        Start-Sleep -Milliseconds 800
+        Start-Sleep -Milliseconds 500
+        $process.Refresh()
+        if (-not $process.HasExited) {
+            # 程序带 requireAdministrator 清单，非提权进程 Stop-Process / Kill 只会得到 Access is denied。
+            # 可靠做法是让 taskkill 自己提权来收尸，否则下一次编译会撞 MSB3021 文件占用。
+            Write-Host '[smoke] 进程未退出（自提权进程常见），改用提权 taskkill 收尾'
+            Start-Process -FilePath taskkill -ArgumentList '/F','/IM','LanMouseShare.exe' -Verb RunAs -Wait -ErrorAction SilentlyContinue | Out-Null
+            Start-Sleep -Milliseconds 800
+            $process.Refresh()
+        }
+        Start-Sleep -Milliseconds 300
     }
     $exitCode = $null
     try { $exitCode = $process.ExitCode } catch { $exitCode = $null }
