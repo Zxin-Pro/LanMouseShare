@@ -1,8 +1,11 @@
 ﻿<#
     package.ps1 —— 打包成可分发 zip
 
-    产物：dist\LanMouseShare-<版本>-win.zip
-    内容：LanMouseShare.exe、README.md、LICENSE、CHANGELOG.md、docs\ 全部文档、快速开始.txt
+    产物：dist\LanMouseShare-<版本>-win.zip      解压即用版
+          dist\LanMouseShare-<版本>-setup.exe    单文件安装程序（把 zip 内嵌在 exe 里）
+          dist\SHA256SUMS.txt                    两个产物的 SHA256
+
+    顺序说明：安装程序 exe 里嵌的就是这份 zip，所以必须先打 zip、再喂给安装程序项目重新编译。
 
     退出码：0 = 成功，1 = 失败。
 #>
@@ -138,4 +141,49 @@ Get-ChildItem $stage -Recurse -File | ForEach-Object {
     $rel = $_.FullName.Substring($stage.Length + 1)
     Write-Host ("         {0}" -f $rel)
 }
+
+# ---------- 单文件安装程序 ----------
+# 把刚打好的 zip 当作内嵌载荷喂给安装程序项目，再重编一次，
+# 出来的 LanMouseShareSetup.exe 一个文件就能装完全部东西。
+$setupProject = Join-Path $root 'src\LanMouseShare.Setup\LanMouseShare.Setup.csproj'
+$payload      = Join-Path $root 'src\LanMouseShare.Setup\Assets\payload.zip'
+$setupBuilt   = Join-Path $root ("src\LanMouseShare.Setup\bin\{0}\LanMouseShareSetup.exe" -f $Configuration)
+$setupDist    = Join-Path $dist ("LanMouseShare-{0}-setup.exe" -f $version)
+
+if (Test-Path $setupProject) {
+    Write-Host ''
+    Write-Host '[pack] 开始打单文件安装程序……'
+
+    $payloadDir = Split-Path -Parent $payload
+    if (-not (Test-Path $payloadDir)) { New-Item -ItemType Directory -Path $payloadDir -Force | Out-Null }
+    Copy-Item $zip -Destination $payload -Force
+    Write-Host ("[pack] 内嵌载荷：{0} KB" -f [math]::Round((Get-Item $payload).Length / 1KB, 1))
+
+    # 载荷变了，安装程序项目必然重新编译
+    & (Join-Path $toolsDir 'build.ps1') -Configuration $Configuration
+
+    if (-not (Test-Path $setupBuilt)) { throw "找不到安装程序：$setupBuilt" }
+    if (Test-Path $setupDist) { Remove-Item $setupDist -Force }
+    Copy-Item $setupBuilt -Destination $setupDist
+
+    Write-Host ("[pack] 安装程序：{0}" -f $setupDist)
+    Write-Host ("[pack] 体积    ：{0} KB" -f [math]::Round((Get-Item $setupDist).Length / 1KB, 1))
+} else {
+    Write-Host '[pack] 跳过安装程序（找不到 LanMouseShare.Setup.csproj）'
+}
+
+# ---------- 校验和 ----------
+$sums = Join-Path $dist 'SHA256SUMS.txt'
+$sumLines = @()
+foreach ($f in @($zip, $setupDist)) {
+    if (Test-Path $f) {
+        $hash = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash
+        $sumLines += ("{0}  {1}" -f $hash, (Split-Path -Leaf $f))
+    }
+}
+[System.IO.File]::WriteAllText($sums, (($sumLines -join [Environment]::NewLine) + [Environment]::NewLine), (New-Object System.Text.UTF8Encoding($true)))
+Write-Host ''
+Write-Host ("[pack] 校验和   ：{0}" -f $sums)
+$sumLines | ForEach-Object { Write-Host ("         {0}" -f $_) }
+
 exit 0

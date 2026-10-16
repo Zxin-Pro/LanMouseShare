@@ -12,8 +12,11 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `LanMouseShare-<版本>-win.zip` | 推荐。解压即用，内含程序、README、使用手册、快速开始 |
-| `LanMouseShare.exe` | 只有主程序，适合替换已有目录里的旧版 |
+| `LanMouseShare-<版本>-setup.exe` | **推荐**。一个 exe 装完全部：双击 → 点「安装」→ 完事。自动放好程序、建桌面和开始菜单快捷方式、在「程序和功能」里登记（可以正常卸载） |
+| `LanMouseShare-<版本>-win.zip` | 免安装。解压到任意目录双击就能用，内含程序、README、使用手册、快速开始 |
+| `SHA256SUMS.txt` | 上面两个文件的 SHA256 校验和 |
+
+安装版会先检查 .NET Framework 4.8 装没装，没装就直接告诉你并给出官方下载页——不会让你装完才发现跑不起来。
 
 ## 特性
 
@@ -43,7 +46,9 @@
 
 两台电脑都要做：
 
-1. 到 [最新 Release](https://github.com/Zxin-Pro/LanMouseShare/releases/latest) 下载 `LanMouseShare-<版本>-win.zip`，解压到任意目录（不要放在中文路径下的深层目录，省得惹麻烦）
+1. 到 [最新 Release](https://github.com/Zxin-Pro/LanMouseShare/releases/latest) 拿程序，两种方式挑一个：
+   - **安装版**：下载 `LanMouseShare-<版本>-setup.exe` 双击安装。装完桌面就有快捷方式，卸载走「控制面板 → 程序和功能」里的 **LanMouseShare**。
+   - **免安装版**：下载 `LanMouseShare-<版本>-win.zip`，解压到任意目录（不要放在中文路径下的深层目录，省得惹麻烦）
 2. 双击 `LanMouseShare.exe`。程序需要管理员权限，**每次启动都会弹 UAC**，点「是」——全局钩子和模拟输入都需要这个权限
 3. 主机的「共享」页：角色选 **主机**，填一个连接密钥（随便一串字符，两台电脑必须一样），点「开始共享」
 4. 副机的「共享」页：角色选 **副机**，填**同一个连接密钥**，「主机 IP」填主机的局域网地址（主机上点「复制本机 IP」就能拿到），点「开始共享」

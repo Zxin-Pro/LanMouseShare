@@ -4,6 +4,8 @@ VisualStudioVersion = 15.0.28307.902
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LanMouseShare.App", "src\LanMouseShare.App\LanMouseShare.App.csproj", "{7B3A5C2E-9D41-4F87-A1B6-2C5E8F0D3A74}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "LanMouseShare.Setup", "src\LanMouseShare.Setup\LanMouseShare.Setup.csproj", "{2E9F4B17-8C53-4A6D-B0E9-5F1A7C3D8B42}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -14,6 +16,10 @@ Global
 		{7B3A5C2E-9D41-4F87-A1B6-2C5E8F0D3A74}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{7B3A5C2E-9D41-4F87-A1B6-2C5E8F0D3A74}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{7B3A5C2E-9D41-4F87-A1B6-2C5E8F0D3A74}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2E9F4B17-8C53-4A6D-B0E9-5F1A7C3D8B42}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2E9F4B17-8C53-4A6D-B0E9-5F1A7C3D8B42}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2E9F4B17-8C53-4A6D-B0E9-5F1A7C3D8B42}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2E9F4B17-8C53-4A6D-B0E9-5F1A7C3D8B42}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
