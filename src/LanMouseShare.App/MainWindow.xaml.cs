@@ -40,6 +40,12 @@ namespace LanMouseShare
         private bool _initializing = true;
         private bool _exitRequested;
         private UpdateInfo _lastUpdate;
+
+        /// <summary>
+        /// 主机光标管家：进入副机模式时盖全屏罩窗并藏掉本机箭头，回来时还回去。
+        /// 只在界面线程上使用（ShowCursor 的显示计数是按线程记的，罩窗也得属于同一条线程）。
+        /// </summary>
+        private Core.Host.HostCursorController _cursorControl;
         private List<KeyValuePair<string, string>> _diagnosticsRows;
         private string _lanAddressSummary = "（正在检测……）";
         private string _firewallSummary = "（正在检测……）";
@@ -91,6 +97,27 @@ namespace LanMouseShare
                 }
             };
 
+            // 主机光标管家：盖一块全屏、置顶、几乎全透明的自家罩窗，
+            // 再在界面线程上把显示计数扣成负数。
+            // 为什么必须这么做（以及为什么以前那套「钉到屏幕中心 + 在钩子线程扣计数」根本不成立）
+            // 见 Core\Host\CursorShieldWindow.cs 里的实测记录。
+            //
+            // 必须建在界面线程上：ShowCursor 的显示计数是按线程记的，
+            // 而且只有「光标当前压倒的那个窗口所属线程」的计数才作数，
+            // 罩窗和扣计数必须是同一条线程 —— 也就是这条 UI 线程。
+            _cursorControl = new Core.Host.HostCursorController(Dispatcher);
+            _session.HostCursorControl = delegate(bool engaged)
+            {
+                if (Dispatcher.CheckAccess())
+                {
+                    ApplyCursorControl(engaged);
+                }
+                else
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate { ApplyCursorControl(engaged); }));
+                }
+            };
+
             _session.Log += OnSessionLog;
             _session.ConnectedChanged += OnSessionConnected;
             _session.LocationChanged += OnSessionLocation;
@@ -110,6 +137,163 @@ namespace LanMouseShare
         public void PrepareForExit()
         {
             _exitRequested = true;
+
+            // 兜底：退出前必须把用户的鼠标箭头还回去。
+            // ShowCursor 是引用计数语义，少还一次，箭头就再也回不来了（只能注销或重启），
+            // 罩窗也一样必须撤掉 —— 否则屏幕上会永远留着一层看不见的置顶窗口挡点击。
+            ReleaseCursorControl();
+        }
+
+        /// <summary>
+        /// 光标管家的实际执行体。只能在界面线程上跑。
+        /// engaged=true：盖罩窗 → 搬光标到停放点 → 扣显示计数。
+        /// engaged=false：还计数 → 撤罩窗（顺序不能反）。
+        /// </summary>
+        private void ApplyCursorControl(bool engaged)
+        {
+            Core.Host.HostCursorController control = _cursorControl;
+            if (control == null)
+            {
+                return;
+            }
+
+            try
+            {
+                if (engaged)
+                {
+                    control.Engage();
+
+                    // 罩窗盖住的是整个虚拟桌面（多显示器时比主显示器大），这里报的是罩窗的真实尺寸
+                    int shieldWidth = Core.Input.VirtualScreen.VirtualWidth > 0
+                        ? Core.Input.VirtualScreen.VirtualWidth : Core.Input.VirtualScreen.PrimaryWidth;
+                    int shieldHeight = Core.Input.VirtualScreen.VirtualHeight > 0
+                        ? Core.Input.VirtualScreen.VirtualHeight : Core.Input.VirtualScreen.PrimaryHeight;
+
+                    // 关键诊断：不是「我们以为自己藏了」，而是「问系统要的真实答案」。
+                    // 用户报的「主屏的鼠标还在主屏显示着」就靠这一行当场分辨真假。
+                    bool visible = InputInjector.IsCursorVisible();
+                    AppendLog("光标罩窗已盖住 " + shieldWidth + "x" + shieldHeight
+                              + "，显示计数扣到 " + InputInjector.HiddenCursorCalls + " 层，"
+                              + "系统现在报告本机箭头：" + (visible ? "仍可见（没藏住！）" : "不可见（已藏住）"));
+                }
+                else
+                {
+                    control.Disengage();
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendLog("警告：光标处理出错 —— " + ex.Message);
+            }
+        }
+
+        /// <summary>退出兜底：无论当前什么状态都把箭头还回去、把罩窗撤掉。</summary>
+        public void ReleaseCursorControl()
+        {
+            Core.Host.HostCursorController control = _cursorControl;
+            if (control == null)
+            {
+                return;
+            }
+
+            try
+            {
+                control.ReleaseAll();
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        private bool _shieldProbeOk;
+        private string _shieldProbeDetail = string.Empty;
+
+        /// <summary>最近一次「光标罩窗」实测的说明文字，给自检显示用。</summary>
+        public string CursorShieldProbeDetail
+        {
+            get { return _shieldProbeDetail == null ? string.Empty : _shieldProbeDetail; }
+        }
+
+        /// <summary>
+        /// 自检用：走一遍真实路径「盖罩窗 → 扣显示计数 → 问系统箭头到底还画不画 → 撤罩窗 → 再问一遍」。
+        /// 从任何线程调用都行（不是界面线程会自己转过去）。
+        ///
+        /// 为什么判据换成 GetCursorInfo：1.0.4 里那条「GetCursorInfo 不反映显示计数」的结论是错的，
+        /// 错在当时的实验是在「光标压着别人的窗口」的条件下做的 —— 那种条件下计数本来就不生效。
+        /// 1.0.5 的实测（lms-cursor2.ps1 / lms-cursor3.ps1）确立了真正的规则：
+        /// 「光标画不画，取决于光标当前压倒的那个窗口所属线程的显示计数」，
+        /// 所以只要罩窗盖满全屏（光标必然压在罩窗上），我们自己的线程计数就生效，
+        /// GetCursorInfo 也就成了可靠的判据。
+        /// </summary>
+        public bool VerifyCursorHiddenWithShield()
+        {
+            if (!Dispatcher.CheckAccess())
+            {
+                Dispatcher.Invoke(new Action(ProbeCursorShield));
+            }
+            else
+            {
+                ProbeCursorShield();
+            }
+
+            return _shieldProbeOk;
+        }
+
+        private void ProbeCursorShield()
+        {
+            _shieldProbeOk = false;
+            _shieldProbeDetail = string.Empty;
+
+            // 上一轮如果留下脏状态，先收干净，免得误判
+            if (InputInjector.HiddenCursorCalls > 0)
+            {
+                InputInjector.ShowCursor();
+            }
+
+            if (_cursorControl == null)
+            {
+                _cursorControl = new Core.Host.HostCursorController(Dispatcher);
+            }
+
+            Core.Host.HostCursorController control = _cursorControl;
+
+            try
+            {
+                if (control.IsEngaged)
+                {
+                    control.Disengage();
+                }
+
+                int hides = control.Engage();
+                bool hidesOk = hides > 0 && InputInjector.HiddenCursorCalls > 0
+                               && !InputInjector.IsCursorVisible();
+
+                control.Disengage();
+                bool restoreOk = InputInjector.HiddenCursorCalls == 0
+                                 && InputInjector.IsCursorVisible();
+
+                _shieldProbeDetail = "罩窗已盖住 " + Core.Input.VirtualScreen.PrimaryWidth + "x"
+                    + Core.Input.VirtualScreen.PrimaryHeight
+                    + "，显示计数扣到 " + hides + " 层（< 0 即不画）；"
+                    + "扣着的时候系统报告箭头" + (hidesOk ? "不可见（符合预期）" : "仍可见（不符合预期）")
+                    + "；撤掉罩窗后计数回到 " + InputInjector.HiddenCursorCalls + " 层，系统报告箭头"
+                    + (restoreOk ? "可见（符合预期）" : "不可见（没还干净）");
+
+                _shieldProbeOk = hidesOk && restoreOk;
+            }
+            catch (Exception ex)
+            {
+                _shieldProbeDetail = "罩窗实测出错 —— " + ex.Message;
+                _shieldProbeOk = false;
+
+                try
+                {
+                    control.ReleaseAll();
+                }
+                catch (Exception)
+                {
+                }
+            }
         }
 
         public void SetSelfTestResult(SelfTestRunner runner)

@@ -143,6 +143,13 @@ namespace LanMouseShare.Core.Sharing
         /// </summary>
         public Action<Action> UiDispatch { get; set; }
 
+        /// <summary>
+        /// 主机的光标管家：盖罩窗 → 搬光标 → 扣显示计数。
+        /// 由界面层注入（需要 Dispatcher 才能建罩窗）。没注入时会退回
+        /// 「只扣计数」的老做法，那在没有罩窗的情况下藏不住别的窗口上的箭头。
+        /// </summary>
+        public Action<bool> HostCursorControl { get; set; }
+
         public event Action<CursorLocation> LocationChanged;
         public event Action<string> Log;
 
@@ -362,8 +369,26 @@ namespace LanMouseShare.Core.Sharing
                     return;
                 }
 
+                // 位移合理性闸门。真机上出现过「位移算成 900 多像素」的现场：
+                // SetCursorPos 钉住失败、或者副机侧有别的程序在动光标，都会让
+                // ComputeDelta 拿到一个和现实完全脱节的基准，于是 _virtualX/_virtualY
+                // 一路跑飞，归一化之后被系统夹到边上 —— 用户看到的就是
+                // 「一划鼠标，副机光标要么跑到最上面，要么跑到最下面」。
+                // 单次事件的合理位移不可能超过半屏，超了就只把基准校正回真实坐标，
+                // 这一次的位移整个丢掉，绝不让脏基准污染虚拟坐标。
+                if (!IsPlausibleDelta(dx, dy))
+                {
+                    RebaseAnchor(e);
+                    LogMessage("警告：本次鼠标位移 " + dx + "," + dy
+                               + " 超出单次事件的合理范围，已丢弃并重新校正基准"
+                               + "（主机屏幕 " + _layout.HostWidth + "x" + _layout.HostHeight + "）。");
+                    return;
+                }
+
                 _virtualX += _layout.ScaleDelta(dx, _layout.HostWidth, _layout.RemoteWidth);
                 _virtualY += _layout.ScaleDelta(dy, _layout.HostHeight, _layout.RemoteHeight);
+
+                ClampVirtual();
 
                 LogRemoteProbe(e, dx, dy);
 
@@ -482,6 +507,44 @@ namespace LanMouseShare.Core.Sharing
         }
 
         /// <summary>
+        /// 单次鼠标事件的位移合理性判定。
+        /// 半屏是个很宽松的上限：真机实测最猛的甩鼠标一次也就两三百像素，
+        /// 而「基准脱节」那种事故算出来的动辄上千。
+        /// </summary>
+        private bool IsPlausibleDelta(int dx, int dy)
+        {
+            int limitX = _layout.HostWidth > 0 ? _layout.HostWidth / 2 : 4096;
+            int limitY = _layout.HostHeight > 0 ? _layout.HostHeight / 2 : 4096;
+            if (dx > limitX || dx < -limitX)
+            {
+                return false;
+            }
+
+            if (dy > limitY || dy < -limitY)
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>把基准重新校正到当前真实光标位置（用于丢弃脏位移之后）。</summary>
+        private void RebaseAnchor(MouseHookEventArgs e)
+        {
+            _lastHostX = e.X;
+            _lastHostY = e.Y;
+        }
+
+        /// <summary>
+        /// 把虚拟副机坐标夹回有界范围。真正的规则住在 ScreenLayout.ClampVirtualToRemote
+        /// 里（那样才被自检断言覆盖得到），这里只做一个薄封装。
+        /// </summary>
+        private void ClampVirtual()
+        {
+            _layout.ClampVirtualToRemote(ref _virtualX, ref _virtualY);
+        }
+
+        /// <summary>
         /// 停放点 = 主机屏幕正中心。
         /// 选中心是因为它到四条边的距离都最远：用户朝任意方向甩出一个
         /// 大幅位移时可用行程最大（半个屏），被系统夹在边缘而丢掉位移的
@@ -527,6 +590,15 @@ namespace LanMouseShare.Core.Sharing
         {
             if (InputInjector.HiddenCursorCalls == 0)
             {
+                return;
+            }
+
+            Action<bool> control = HostCursorControl;
+            if (control != null)
+            {
+                // 界面层接管：还计数 + 撤罩窗一起做，顺序不能反
+                OnHookThread(delegate { control(false); });
+                LogMessage("主机光标已恢复显示（还回显示计数并撤掉光标罩窗）");
                 return;
             }
 
@@ -590,6 +662,29 @@ namespace LanMouseShare.Core.Sharing
 
         // ------------------------------------------------------------ 状态切换
 
+        /// <summary>
+        /// 藏主机箭头：优先走光标管家（罩窗 + 计数），没注入就退回老的「只扣计数」。
+        /// 返回值是累计扣掉的显示计数层数。
+        /// </summary>
+        private int HideHostCursor()
+        {
+            Action<bool> control = HostCursorControl;
+            if (control != null)
+            {
+                OnHookThread(delegate { control(true); });
+                return InputInjector.HiddenCursorCalls;
+            }
+
+            return InputInjector.HideCursor();
+        }
+
+        private static string ShieldSizeText()
+        {
+            int w = VirtualScreen.VirtualWidth > 0 ? VirtualScreen.VirtualWidth : VirtualScreen.PrimaryWidth;
+            int h = VirtualScreen.VirtualHeight > 0 ? VirtualScreen.VirtualHeight : VirtualScreen.PrimaryHeight;
+            return w + "x" + h;
+        }
+
         private void EnterRemote(int remoteX, int remoteY, int dx, int dy)
         {
             _virtualX = remoteX;
@@ -607,13 +702,16 @@ namespace LanMouseShare.Core.Sharing
             UpdateParkPoint();
             ParkHostCursor();
 
-            // 藏箭头。Remote 期间主机光标虽然在中心不动，但它毕竟还画着；
+            // 藏箭头。1.0.5 起不再只是「扣显示计数」——那没用，原因见 CursorShieldWindow：
+            // ShowCursor 的计数按线程记，而且只有「光标当前压倒的那个窗口所属线程」的计数作数。
+            // 所以必须先把整屏盖上一块几乎全透明的自家罩窗，让光标无论在哪都落在我们自己的窗口上。
             // 用户的原话就是「主机的鼠标划过去 主机屏幕上还显示鼠标」。
-            int hides = InputInjector.HideCursor();
+            int hides = HideHostCursor();
 
             SendRemoteMove();
             LogMessage("鼠标已切换到副电脑（虚拟坐标 " + _virtualX + "," + _virtualY
-                       + "，主机光标钉在 " + _parkX + "," + _parkY + " 并隐藏，扣了 " + hides + " 层显示计数）");
+                       + "，主机光标钉在 " + _parkX + "," + _parkY
+                       + "，罩窗已盖住 " + ShieldSizeText() + "，扣了 " + hides + " 层显示计数）");
             RaiseLocation();
         }
 

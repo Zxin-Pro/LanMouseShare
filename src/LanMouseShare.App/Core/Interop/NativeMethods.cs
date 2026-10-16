@@ -348,5 +348,61 @@ namespace LanMouseShare.Core.Interop
 
         [DllImport("kernel32.dll")]
         internal static extern uint GetCurrentThreadId();
+
+        // ------------------------------------------------------------ 窗口置顶与光标遮挡（1.0.5）
+
+        /// <summary>SetWindowPos 的 hWndInsertAfter 取值：HWND_TOPMOST。</summary>
+        internal static readonly IntPtr HwndTopmost = new IntPtr(-1);
+
+        internal const int SwpNosize = 0x0001;
+        internal const int SwpNomove = 0x0002;
+        internal const int SwpNoactivate = 0x0010;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+            int X, int Y, int cx, int cy, uint uFlags);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool UpdateWindow(IntPtr hWnd);
+
+        /// <summary>
+        /// AnyCPU 下 GetWindowLong / SetWindowLong **必须分位数**：
+        /// 32 位导出的是 GetWindowLongW（返回 4 字节），64 位导出的是 GetWindowLongPtrW（返回 8 字节），
+        /// 名字看着一样但签名不同，按一个声明去调，在另一种位数上就是栈错位崩溃。
+        /// 这里统一包一层，调用方不用关心位数。
+        /// </summary>
+        internal static int GetWindowLong(IntPtr hWnd, int nIndex)
+        {
+            if (IntPtr.Size == 8)
+            {
+                return (int)GetWindowLongPtr64(hWnd, nIndex);
+            }
+
+            return GetWindowLong32(hWnd, nIndex);
+        }
+
+        internal static int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong)
+        {
+            if (IntPtr.Size == 8)
+            {
+                return (int)SetWindowLongPtr64(hWnd, nIndex, new IntPtr(dwNewLong));
+            }
+
+            return SetWindowLong32(hWnd, nIndex, dwNewLong);
+        }
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
+        private static extern int GetWindowLong32(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+        private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
+        private static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+        private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
     }
 }

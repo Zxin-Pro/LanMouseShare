@@ -269,6 +269,61 @@ namespace LanMouseShare.Core.Layout
             remoteY = Clamp(remoteY, 0, RemoteHeight - 1);
         }
 
+        /// <summary>
+        /// 把虚拟副机坐标夹在一个**有界**的范围里。这是防「光标跑飞」的最后一道闸，
+        /// 在每次累加完位移、做回程判定之前调用。
+        ///
+        /// 为什么必须夹：_virtualX/_virtualY 是累加出来的，只要有一次基准脱节
+        /// 就会一路涨上去。而不夹的话，CoordinateMapper 内置的钳位会把超界值
+        /// 饱和成 0 或 65535 —— 副机看到的就是「鼠标一划，光标窜到屏幕最上面
+        /// 或最下面」，而且之后要往反方向挪很久才追得回来，手感上就是
+        /// 「光标卡死在边上，副机根本没法操作」。
+        ///
+        /// 上下界**按屏幕相对位置分开定**：朝着主机的那条边是接口边，必须允许它
+        /// 溢出一点（回程判定要求越过 ReturnGuard 像素），其余三条边都是外侧边，
+        /// 一律夹在副机屏幕内。四条正好对应 TryExitRemote 里四个分支的阈值：
+        ///   副机在右侧：左边是接口边，可到 -(ReturnGuard + 64)；右边夹在 RemoteWidth - 1
+        ///   副机在左侧：右边是接口边，可到 RemoteWidth - 1 + ReturnGuard + 64；左边夹在 0
+        ///   副机在下方：上边是接口边，可到 -(ReturnGuard + 64)；下边夹在 RemoteHeight - 1
+        ///   副机在上方：下边是接口边，可到 RemoteHeight - 1 + ReturnGuard + 64；上边夹在 0
+        ///
+        /// 注意与 ClampRemote 的分工：ClampRemote 是「发送给副机时」用的窄夹紧（严格
+        /// 夹在屏幕内），本方法是「做回程判定前」用的宽夹紧（允许接口边溢出）。
+        /// 两者都存在是刻意的，不要合并。
+        /// </summary>
+        public void ClampVirtualToRemote(ref int remoteX, ref int remoteY)
+        {
+            int guard = ReturnGuard > 0 ? ReturnGuard : DefaultReturnGuard;
+            int slack = guard + 64;
+
+            int xLow = 0;
+            int xHigh = RemoteWidth > 0 ? RemoteWidth - 1 : 4096;
+            int yLow = 0;
+            int yHigh = RemoteHeight > 0 ? RemoteHeight - 1 : 4096;
+
+            switch (Side)
+            {
+                case ScreenSide.Right:
+                    xLow = -slack;
+                    break;
+
+                case ScreenSide.Left:
+                    xHigh += slack;
+                    break;
+
+                case ScreenSide.Above:
+                    yHigh += slack;
+                    break;
+
+                default: // Below
+                    yLow = -slack;
+                    break;
+            }
+
+            remoteX = Clamp(remoteX, xLow, xHigh);
+            remoteY = Clamp(remoteY, yLow, yHigh);
+        }
+
         public static int Clamp(int value, int min, int max)
         {
             if (value < min)

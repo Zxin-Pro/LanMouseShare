@@ -100,6 +100,8 @@
     <Compile Include="Core\Sharing\SharingSession.cs" />
     <Compile Include="Core\Interop\NativeMethods.cs" />
     <Compile Include="Core\Interop\DpiAwareness.cs" />
+    <Compile Include="Core\Host\CursorShieldWindow.cs" />
+    <Compile Include="Core\Host\HostCursorController.cs" />
     <Compile Include="Core\Diagnostics\Log.cs" />
     <Compile Include="Core\Diagnostics\SelfTestRunner.cs" />
     <Compile Include="Core\Diagnostics\NetworkLoopbackTest.cs" />

@@ -269,12 +269,16 @@ namespace LanMouseShare.Core.Input
         /// 做法：先 ShowCursor(true) 拿到新值（= C+1），紧跟着 ShowCursor(false)
         /// 把它原样还原，净变化为 0 —— 所以调用它不会影响光标状态。
         ///
-        /// 为什么必须绕这一道：GetCursorInfo 的 CURSOR_SHOWING **并不反映这个计数**。
-        /// 提权实测（`lms-cursor-probe.ps1`）：连续 ShowCursor(false) 的返回值一路是
-        /// -1 / -2 / -3 / -4（计数确实压到负了），而同一线程上的 GetCursorInfo
-        /// 依旧报 flags=0x1 SHOWING=True、hCursor 不变；连 SetSystemCursor 换成
-        /// 全透明光标之后它还是这么报。所以「藏起来了没有」只能用文档定义的机制本身
-        /// 来验证，不能拿 GetCursorInfo 当证据。
+        /// **1.0.5 更正**：1.0.5 之前这里写着「GetCursorInfo 不反映这个计数，不能当证据」。
+        /// 那条结论是错的，错在把「压别的窗口上测」当成了推翻依据。提权重测（lms-cursor2.ps1）：
+        ///
+        ///   A.光标压在我们自己的窗口上，count=0  → flags=0x1 showing=True
+        ///   B.光标压在我们自己的窗口上，count=-3 → flags=0x0 showing=False  ☆计数确实生效
+        ///   C.光标压在别的窗口上，    count=-3 → flags=0x1 showing=True
+        ///
+        /// 也就是说 GetCursorInfo 的 CURSOR_SHOWING **忠实反映「此刻画不画」**，
+        /// 只不过它的前提是「光标得压在我们自己线程的窗口上」—— 这正是 1.0.5 加罩窗的原因，
+        /// 见 Core\Host\CursorShieldWindow.cs。
         /// </summary>
         public static int DisplayCount
         {
@@ -287,10 +291,12 @@ namespace LanMouseShare.Core.Input
         }
 
         /// <summary>
-        /// 光标此刻是否画着（GetCursorInfo 口径）。
+        /// 光标此刻是否真的画着（GetCursorInfo 口径）。
         ///
-        /// **注意：它不是「我们藏成功了没有」的判据**（原因见 DisplayCount 的注释）。
-        /// 保留它只是为了拿到 hCursor 和坐标做别的诊断，自检里不要再用它判定隐藏。
+        /// 1.0.5 起这就是「藏成功了没有」的**首选判据**（理由见 DisplayCount 的注释）：
+        /// 前提是光标得压在我们自己线程的窗口上 —— 正常情况下由 CursorShieldWindow
+        /// 那块全屏罩窗保证，所以自检里会先把罩窗盖上再断言。
+        /// 查不到时保守返回「可见」，不谎报成功。
         /// cbSize 必须现算：x86 = 20、x64 = 24。
         /// </summary>
         public static bool IsCursorVisible()

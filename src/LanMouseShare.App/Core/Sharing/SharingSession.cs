@@ -67,6 +67,14 @@ namespace LanMouseShare.Core.Sharing
         /// </summary>
         public Action<Action> UiDispatch { get; set; }
 
+        /// <summary>
+        /// 由宿主层（WPF 主窗口）注入的「主机光标管家」开关：
+        /// 参数 true = 盖罩窗并藏箭头，false = 还计数并撤罩窗。
+        /// 核心层不引用 WPF，建不了罩窗，所以只能由界面层实现后传进来。
+        /// 完全不注入也能跑，只是那种情况下主机进副机模式时箭头藏不住。
+        /// </summary>
+        public Action<bool> HostCursorControl { get; set; }
+
         public HostController Host
         {
             get { return _host; }
@@ -136,6 +144,7 @@ namespace LanMouseShare.Core.Sharing
                     // 需要它的原因见 HostController.OnHookThread：ShowCursor 的
                     // 显示计数是按线程记的，断线兜底必须回到装钩子那条线程上还。
                     _host.UiDispatch = UiDispatch;
+                    _host.HostCursorControl = HostCursorControl;
                     _host.Layout = options.Layout ?? new ScreenLayout();
                     _host.Layout.HostWidth = VirtualScreen.PrimaryWidth;
                     _host.Layout.HostHeight = VirtualScreen.PrimaryHeight;

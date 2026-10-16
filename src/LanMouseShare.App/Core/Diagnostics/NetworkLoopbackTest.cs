@@ -5,6 +5,8 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using LanMouseShare.Core.Input;
+using LanMouseShare.Core.Interop;
+using LanMouseShare.Core.Layout;
 using LanMouseShare.Core.Net;
 
 namespace LanMouseShare.Core.Diagnostics
@@ -16,7 +18,8 @@ namespace LanMouseShare.Core.Diagnostics
     /// 而这个测试在**同一台机器**上用回环地址把「握手 → 认证 → 屏幕信息 → 各种输入帧」
     /// 整条链路跑一遍，一次运行 5 秒内出结论。
     ///
-    /// 它**不装钩子、不注入输入、不动真实鼠标**，所以可以随时跑，包括在 CI 里跑。
+    /// 它**不装钩子、不拦截输入**。唯一会碰真实机器的地方是 CheckInjection：
+    /// 它故意真的搬一下光标，用来验证「副机能否被操作」这条命脉，跑完立刻还原原位。
     /// </summary>
     public static class NetworkLoopbackTest
     {
@@ -117,6 +120,10 @@ namespace LanMouseShare.Core.Diagnostics
 
             // ---------------------------------------------------------- 协议编解码
             CheckProtocolCodec(check);
+
+            // -------------------------------------------------- 副机侧输入注入（动真实光标）
+            // 这一项会真的搬动光标，跑完会还原，所以放在网络部分之前，避免干扰后续判断。
+            CheckInjection(check);
 
             // ---------------------------------------------------------- 正确密钥链路
             int port = FindFreePort();
@@ -486,6 +493,80 @@ namespace LanMouseShare.Core.Diagnostics
             catch (Exception)
             {
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// 副机侧注入实测：真的调 SendInput 把光标搬过去，再用 GetCursorPos 核对落点。
+        ///
+        /// 为什么非要有这一项：1.0.4 之前整个自检体系都只验「帧发出去了、帧收到了、坐标数值没变」，
+        /// 从来没有任何一条断言验过「副机上的光标到底动了没有」。用户的反馈
+        /// 「根本不能发在副屏操作」恰好落在这个真空里 —— 帧是对的，注入可能是错的。
+        ///
+        /// 这一项会把用户的光标搬走两下（约 120 毫秒），跑完立刻还原原位置。
+        /// 落点判据取 ±2 像素：绝对坐标注入本身允许 1 像素的取整差，
+        /// 再考虑「鼠标指针精度增强」在绝对定位下不生效，2 像素足够宽松又足够严格。
+        /// </summary>
+        private static void CheckInjection(Action<string, bool, string> check)
+        {
+            int width = VirtualScreen.PrimaryWidth > 0 ? VirtualScreen.PrimaryWidth : 1920;
+            int height = VirtualScreen.PrimaryHeight > 0 ? VirtualScreen.PrimaryHeight : 1080;
+
+            NativeMethods.POINT original;
+            bool haveOriginal = NativeMethods.GetCursorPos(out original);
+
+            try
+            {
+                // (1) 屏幕正中
+                int midX = width / 2;
+                int midY = height / 2;
+                int nx = CoordinateMapper.PixelsToNormalized(midX, width);
+                int ny = CoordinateMapper.PixelsToNormalized(midY, height);
+                bool sent = InputInjector.MoveAbsolute(nx, ny);
+                Thread.Sleep(80);
+
+                NativeMethods.POINT landed;
+                bool read = NativeMethods.GetCursorPos(out landed);
+                int wantX = CoordinateMapper.NormalizedToPixels(nx, width);
+                int wantY = CoordinateMapper.NormalizedToPixels(ny, height);
+                int errX = Math.Abs(landed.x - wantX);
+                int errY = Math.Abs(landed.y - wantY);
+
+                check("副机注入：绝对坐标真的把光标搬到了目标位置",
+                    sent && read && errX <= 2 && errY <= 2,
+                    "发送 " + sent.ToString() + "，目标 (" + wantX + "," + wantY + ")，实测 ("
+                    + landed.x + "," + landed.y + ")，误差 " + errX + "/" + errY + " 像素（屏幕 "
+                    + width + "x" + height + "）");
+
+                // (2) 跨屏进入副机时的落脚点：左边缘内缩 EntryGuard 像素
+                int entryX = ScreenLayout.EntryGuard;
+                int entryY = height / 2;
+                int ex = CoordinateMapper.PixelsToNormalized(entryX, width);
+                int ey = CoordinateMapper.PixelsToNormalized(entryY, height);
+                InputInjector.MoveAbsolute(ex, ey);
+                Thread.Sleep(80);
+
+                NativeMethods.POINT landed2;
+                NativeMethods.GetCursorPos(out landed2);
+                int errX2 = Math.Abs(landed2.x - entryX);
+                int errY2 = Math.Abs(landed2.y - entryY);
+
+                check("副机注入：跨屏落脚点（边缘内缩 " + ScreenLayout.EntryGuard + " 像素）可达",
+                    errX2 <= 2 && errY2 <= 2,
+                    "目标 (" + entryX + "," + entryY + ")，实测 (" + landed2.x + "," + landed2.y
+                    + ")，误差 " + errX2 + "/" + errY2 + " 像素");
+            }
+            catch (Exception ex)
+            {
+                check("副机注入：绝对坐标真的把光标搬到了目标位置", false, "异常 —— " + ex.Message);
+            }
+            finally
+            {
+                // 无论成败都必须把用户的光标放回去
+                if (haveOriginal)
+                {
+                    NativeMethods.SetCursorPos(original.x, original.y);
+                }
             }
         }
 

@@ -423,67 +423,45 @@ namespace LanMouseShare
                 (InputInjector.InputStructSize == 40 ? "64 位进程" : "32 位进程") + "），注入签名 0x" +
                 InputInjector.InjectionSignature.ToString("X"));
 
-            runner.Check("光标隐藏与恢复实测可用", CheckCursorHiding(),
-                "隐藏后显示计数 " + _cursorCountHidden + "（文档语义：< 0 即不画）"
-                + "，还原后回到 " + _cursorCountRestored + "（与隐藏前一致，没有漏还）");
+            runner.Check("光标隐藏与恢复实测可用", CheckCursorHidingReal(), _cursorHideProbeDetail);
 
             runner.Check("边缘落脚点带防抖内缩", CheckEntryGuard(),
                 "EntryGuard = " + ScreenLayout.EntryGuard + " 像素，ReturnGuard = "
                 + ScreenLayout.DefaultReturnGuard + " 像素");
 
+            runner.Check("虚拟副机坐标不会跑飞", CheckVirtualClamp(),
+                "四种屏幕相对位置各验一遍：外侧边一律夹回副机屏幕内（坐标不会饱和到"
+                + "屏幕极边），朝着主机的接口边仍够得着回程阈值（ReturnGuard = "
+                + ScreenLayout.DefaultReturnGuard + " 像素）");
+
             return runner;
         }
 
-        private static int _cursorCountHidden;
-        private static int _cursorCountRestored;
+        private static string _cursorHideProbeDetail = "（自检未运行）";
 
         /// <summary>
-        /// 实测「把本机箭头藏起来」这件事真的做到。
+        /// 实测「把本机箭头藏起来」这件事真的做到 —— 而且是走真实路径做的。
         ///
-        /// 为什么非要有这条断言：1.0.2 的核心改动就是主机控制副机期间隐藏箭头，
-        /// 而 ShowCursor 是引用计数语义 ——「我调用过了」和「真的藏起来了」是两件事。
+        /// 为什么非要有这条断言：主机控制副机期间必须藏掉箭头，而 ShowCursor 是引用计数语义，
+        /// 「我调用过了」和「真的藏起来了」是两件事。1.0.4 就是因为只验了前者，
+        /// 一路绿着自检发出去，到用户手上箭头照样画在屏幕上。
         ///
-        /// 判据取 ShowCursor 的文档定义：显示计数小于 0 时系统不画光标。
-        /// **刻意不用 GetCursorInfo**：提权实测证明它不反映这个计数（计数已经到 -4，
-        /// 它照样报 CURSOR_SHOWING；连 SetSystemCursor 换成全透明光标它也不变），
-        /// 拿它当判据只会得到一个永远失败的假警报。
-        /// DisplayCount 本身是非破坏性的（一升一降，净变化 0）。
+        /// 1.0.5 的实测确立了真正的规则（见 Core\Host\CursorShieldWindow.cs 的注释）：
+        /// 「光标画不画，取决于光标当前压倒的那个窗口所属线程的显示计数」。
+        /// 所以这条断言必须先盖全屏罩窗，再问系统 GetCursorInfo —— 那才是用户看到的东西。
         /// </summary>
-        private static bool CheckCursorHiding()
+        private bool CheckCursorHidingReal()
         {
-            try
+            MainWindow window = _mainWindow;
+            if (window == null)
             {
-                // 先收掉上一轮异常可能留下的脏状态，避免误判
-                if (InputInjector.HiddenCursorCalls > 0)
-                {
-                    InputInjector.ShowCursor();
-                }
-
-                int before = InputInjector.DisplayCount;
-
-                InputInjector.HideCursor();
-                _cursorCountHidden = InputInjector.DisplayCount;
-
-                InputInjector.ShowCursor();
-                _cursorCountRestored = InputInjector.DisplayCount;
-
-                // 两条都要成立：藏的时候计数确实压到负，还的时候确实回到原值。
-                // 第二条防的是「藏了却没还干净」，那会让用户的箭头永远回不来。
-                return _cursorCountHidden < 0 && _cursorCountRestored == before;
-            }
-            catch (Exception)
-            {
-                try
-                {
-                    // 断言失败也必须把箭头还回去，绝不能把用户的鼠标弄丢
-                    InputInjector.ShowCursor();
-                }
-                catch (Exception)
-                {
-                }
-
+                _cursorHideProbeDetail = "主窗口还没创建，建不了光标罩窗";
                 return false;
             }
+
+            bool ok = window.VerifyCursorHiddenWithShield();
+            _cursorHideProbeDetail = window.CursorShieldProbeDetail;
+            return ok;
         }
 
         /// <summary>
@@ -551,6 +529,90 @@ namespace LanMouseShare
 
             // 方向也必须对：在边缘上但往屏幕里走，绝不能穿越
             return !layout.TryExitHost(1919, 600, -5, 0, out remoteX, out remoteY);
+        }
+
+        /// <summary>
+        /// 验证「虚拟副机坐标不会跑飞」这道闸。
+        ///
+        /// 为什么非要有这条断言：1.0.4 的现场是「鼠标一划，副机光标要么窜到屏幕最上面、
+        /// 要么窜到最下面，怎么挪都回不来，副机根本没法操作」。根因就是 _virtualX/_virtualY
+        /// 累加跑飞之后，归一化时被钳位饱和成 0 或 65535 —— 光标被钉死在屏幕极边上，
+        /// 要往反方向挪非常久才追得回来。ClampVirtualToRemote 是这道闸，
+        /// 四种屏幕相对位置各验一遍：外侧边必须夹在副机屏幕内，接口边必须仍够得着回程阈值。
+        /// </summary>
+        private static bool CheckVirtualClamp()
+        {
+            const int remoteW = 1920;
+            const int remoteH = 1080;
+            int slack = ScreenLayout.DefaultReturnGuard + 64;
+            ScreenSide[] sides = new ScreenSide[]
+            {
+                ScreenSide.Right, ScreenSide.Left, ScreenSide.Above, ScreenSide.Below
+            };
+
+            for (int i = 0; i < sides.Length; i++)
+            {
+                ScreenLayout layout = new ScreenLayout();
+                layout.HostWidth = 1920;
+                layout.HostHeight = 1080;
+                layout.RemoteWidth = remoteW;
+                layout.RemoteHeight = remoteH;
+                layout.Side = sides[i];
+
+                // 朝两个方向各甩一个天文数字，看被夹到哪
+                int x = 99999;
+                int y = 99999;
+                layout.ClampVirtualToRemote(ref x, ref y);
+                int highX = x;
+                int highY = y;
+
+                x = -99999;
+                y = -99999;
+                layout.ClampVirtualToRemote(ref x, ref y);
+                int lowX = x;
+                int lowY = y;
+
+                // 期望值：只有「朝着主机的那条边」允许溢出 slack，其余三条边都夹在屏幕内
+                int wantLowX = sides[i] == ScreenSide.Right ? -slack : 0;
+                int wantHighX = sides[i] == ScreenSide.Left ? remoteW - 1 + slack : remoteW - 1;
+                int wantLowY = sides[i] == ScreenSide.Below ? -slack : 0;
+                int wantHighY = sides[i] == ScreenSide.Above ? remoteH - 1 + slack : remoteH - 1;
+
+                if (lowX != wantLowX || highX != wantHighX || lowY != wantLowY || highY != wantHighY)
+                {
+                    Log.Warn("自检：屏幕相对位置 " + sides[i] + " 的夹紧边界不对 —— 实际 x["
+                        + lowX + "," + highX + "] y[" + lowY + "," + highY + "]");
+                    return false;
+                }
+
+                // 站在接口边上必须能穿回主机，否则用户划回来会卡住
+                int hostX;
+                int hostY;
+                bool canReturn;
+                switch (sides[i])
+                {
+                    case ScreenSide.Right:
+                        canReturn = layout.TryExitRemote(lowX, 540, out hostX, out hostY);
+                        break;
+                    case ScreenSide.Left:
+                        canReturn = layout.TryExitRemote(highX, 540, out hostX, out hostY);
+                        break;
+                    case ScreenSide.Above:
+                        canReturn = layout.TryExitRemote(960, highY, out hostX, out hostY);
+                        break;
+                    default:
+                        canReturn = layout.TryExitRemote(960, lowY, out hostX, out hostY);
+                        break;
+                }
+
+                if (!canReturn)
+                {
+                    Log.Warn("自检：屏幕相对位置 " + sides[i] + " 站在接口边时回不了主机");
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         private bool CheckConfigRoundTrip()
